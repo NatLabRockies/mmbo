@@ -1,0 +1,26 @@
+[build-system]
+requires = [
+	"setuptools>=61.0",
+	"scikit-learn",
+	"scipy",
+	"numpy",
+	"functools",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mmbo"
+version = "0.0.1"
+authors = [
+	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
+]
+description = "Multimodal Bayesian Optimization"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+	"Programming Language :: Python :: 3",
+	"Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.nrel.gov/itaylor/mmbo"
