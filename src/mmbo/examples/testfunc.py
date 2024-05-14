@@ -11,6 +11,7 @@ def _make_tablefunc(data, xcol, default=None):
     def func(x, m=default):
         return functions[m](x)
     func.modes = [col for col in data.columns if col != xcol]
+    func.default = default
     return func
 
 li2_energy = _make_tablefunc(_li2_data, "Dist", "HF")
