@@ -1,16 +1,18 @@
 [build-system]
 requires = [
 	"setuptools>=61.0",
-	"scikit-learn",
-	"scipy",
-	"numpy",
-	"functools",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mmbo"
 version = "0.0.1"
+dependencies = [
+	"scikit-learn",
+	"scipy",
+	"numpy",
+	"functools",
+]
 authors = [
 	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
 ]
