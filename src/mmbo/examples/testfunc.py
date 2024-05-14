@@ -5,7 +5,7 @@ import pandas as pd
 # Generate test functions from pandas dataframes by cubic interpolation
 def _make_tablefunc(data, xcol, default=None): 
     functions = {
-        col:interpolate.CubicSpline(data.loc[:,xcol], data.loc[:,col], bc_type="natural") 
+        col:interpolate.CubicSpline(data.loc[:,xcol], data.loc[:,col], extrapolate=False) 
         for col in data.columns if col != xcol
     }
     def func(x, m=default):
