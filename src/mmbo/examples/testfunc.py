@@ -3,8 +3,11 @@ import importlib.resources as resources
 import pandas as pd
 
 # Generate test functions from pandas dataframes by cubic interpolation
-def _make_tablefunc(data, xcol, default=None):
-    functions={col:interpolate.CubicSpline(data.loc[:,xcol], data.loc[:,col]) for col in data.columns if col != xcol}
+def _make_tablefunc(data, xcol, default=None): 
+    functions = {
+        col:interpolate.CubicSpline(data.loc[:,xcol], data.loc[:,col], bc_type="natural") 
+        for col in data.columns if col != xcol
+    }
     def func(x, m=default):
         return functions[m](x)
     func.modes = [col for col in data.columns if col != xcol]
