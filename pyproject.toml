@@ -1,6 +1,7 @@
 [build-system]
 requires = [
 	"setuptools>=61.0",
+    "setuptools-scm>=8.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -11,6 +12,7 @@ dependencies = [
 	"scikit-learn",
 	"scipy",
 	"numpy",
+	"pandas",
 ]
 authors = [
 	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
