@@ -30,5 +30,5 @@ def nice_periodic(x, m=0):
     y = x + 1
     for i in range(m):
         f = i + 1
-        y += np.sin(f * x + (np.pi * f / 2)) / (f ** 2)
+        y += np.sin(f * x + (np.pi * f / 2)) / (f ** 1.01)
     return y
