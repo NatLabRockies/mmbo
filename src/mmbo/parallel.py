@@ -1,8 +1,5 @@
 import torch
 from torch import nn
-from torch.nn import init
-import torch.functional as F
-import itertools
 from typing import Tuple
 
 class Parallel(nn.Module):
@@ -11,7 +8,7 @@ class Parallel(nn.Module):
     applying different activation functions to different sections of the input,
     or having subnetworks of different depth."""
 
-    def __init__(self, *args: Tuple[int, nn.Module], split_dim=1):
+    def __init__(self, *args: Tuple[int, nn.Module], split_dim=-1):
         super(Parallel, self).__init__()
         
         self._sizes = []
