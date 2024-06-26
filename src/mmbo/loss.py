@@ -40,32 +40,28 @@ class NetworkGaussianLoss(nn.Module):
         self._ignorenan = ignorenan
         self._splitdim = splitdim
 
-    def forward(self, input, target):
+    def forward(self, mean_est, sd_est, target):
         if input.shape()[self._splitdim] != 2:
             raise Exception("Expecting length 2 in dimension {}".format(self._splitdim))
-        
-        input_mean, input_sd = torch.chunk(input, 2, dim = self._splitdim)
-        input_mean = input_mean.squeeze(dim = self._splitdim)
-        input_sd = input_sd.squeeze(dim = self._splitdim)
 
         if self._ignorenan:
-            mask_input_mean = torch.logical_not(torch.isnan(input_mean))
-            mask_input_sd = torch.logcial_not(torch.isnan(input_sd))
+            mask_mean_est = torch.logical_not(torch.isnan(mean_est))
+            mask_sd_est = torch.logcial_not(torch.isnan(sd_est))
             mask_target = torch.logical_not(torch.isnan(target))
             mask = torch.logical_and(
                 mask_target,
                 torch.logical_and(
-                    mask_input_mean,
-                    mask_input_sd
+                    mask_mean_est,
+                    mask_sd_est
                 )
             )
-            input_mean_masked = input_mean[mask]
-            input_sd_masked = input_sd[mask]
+            mean_est_masked = mean_est[mask]
+            sd_est_masked = sd_est[mask]
             target_masked = target[mask]
         else:
-            input_mean_masked, input_sd_masked, target_masked = input_mean, input_sd, target
+            mean_est_masked, sd_est_masked, target_masked = mean_est, sd_est, target
         
-        return ((input_mean_masked - target_masked) / input_sd_masked).pow(2).sum() / 2 + input_sd_masked.log().sum()
+        return ((mean_est_masked - target_masked) / sd_est_masked).pow(2).sum() / 2 + sd_est_masked.log().sum()
 
 
 class BayesianLoss(nn.Module):
@@ -86,5 +82,5 @@ class NetworkBayesianLoss(nn.Module):
         self._likelihood = NetworkGaussianLoss()
         self._prior_kl = bnn.BKLLoss(reduction="sum")
     
-    def forward(self, model, input, target):
-        return self._prior_kl(model) + self._likelihood(input, target)
+    def forward(self, model, mean_est, sd_est, target):
+        return self._prior_kl(model) + self._likelihood(mean_est, sd_est, target)
