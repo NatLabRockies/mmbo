@@ -35,26 +35,23 @@ class GaussianLoss(nn.Module):
     
 class NetworkGaussianLoss(nn.Module):
 
-    def __init__(self, splitdim = -1, ignorenan = True):
+    def __init__(self, ignorenan = True):
         super(NetworkGaussianLoss, self).__init__()
         self._ignorenan = ignorenan
-        self._splitdim = splitdim
 
     def forward(self, mean_est, sd_est, target):
-        if input.shape()[self._splitdim] != 2:
-            raise Exception("Expecting length 2 in dimension {}".format(self._splitdim))
-
         if self._ignorenan:
-            mask_mean_est = torch.logical_not(torch.isnan(mean_est))
-            mask_sd_est = torch.logcial_not(torch.isnan(sd_est))
-            mask_target = torch.logical_not(torch.isnan(target))
-            mask = torch.logical_and(
-                mask_target,
-                torch.logical_and(
-                    mask_mean_est,
-                    mask_sd_est
-                )
-            )
+            #mask_mean_est = torch.logical_not(torch.isnan(mean_est))
+            #mask_sd_est = torch.logcial_not(torch.isnan(sd_est))
+            #mask_target = torch.logical_not(torch.isnan(target))
+            #mask = torch.logical_and(
+            #    mask_target,
+            #    torch.logical_and(
+            #        mask_mean_est,
+            #        mask_sd_est
+            #    )
+            #)
+            mask = torch.logical_not(torch.isnan(target))
             mean_est_masked = mean_est[mask]
             sd_est_masked = sd_est[mask]
             target_masked = target[mask]
