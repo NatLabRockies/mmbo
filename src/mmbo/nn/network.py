@@ -3,6 +3,7 @@ import torchbnn as bnn
 from torch import nn
 
 
+#TODO: out of date, redo when we decide what kind of error structure we want to use.
 class GaussianNetwork(nn.Module):
     """
     Neural Network model with a mix of frequentist and Bayesian layers.
