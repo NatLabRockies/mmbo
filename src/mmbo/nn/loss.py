@@ -2,6 +2,7 @@ import torch
 import torchbnn as bnn
 from torch import nn
 import torch.nn.init as init
+import math
 
 from .linear import _VarBayesLayer
 
@@ -79,14 +80,26 @@ class NetworkGaussianLoss(nn.Module):
 
 class BayesianLoss(nn.Module):
 
-    def __init__(self):
+    def __init__(self, sigma = None, initialize = None):
+        if initialize is None:
+            initialize = (sigma is None)
+
         super(BayesianLoss, self).__init__()
         self._likelihood = GaussianLoss()
         self._prior_kl = KLLoss()
         self.logsigma = nn.Parameter(torch.Tensor(1))
+
+        if sigma is not None:
+            self.setsigma_(sigma)
+        elif initialize:
+            init.uniform_(self.logsigma, -1, 1)
     
     def forward(self, model, input, target):
         return self._prior_kl(model) + self._likelihood(input, target, self.logsigma)
+    
+    @torch.no_grad
+    def setsigma_(self, sigma):
+        self.logsigma.fill_(math.log(sigma))
     
 class NetworkBayesianLoss(nn.Module):
 
