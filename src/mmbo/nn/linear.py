@@ -4,12 +4,42 @@ from torch import nn
 from torch.nn import init
 import torch.functional as F
 import math
+import abc
+
+def _kl_gaussian(mu_0: torch.Tensor, log_sigma_0: torch.Tensor, mu_1: float, log_sigma_1: float) :
+    """
+    An method for calculating KL divergence between two Normal distribtuion,
+    DKL(P0||P1), where P0 = N(mu0, sigma0), and P1 = N(mu1, sigma1).
+
+    Arguments:
+        mu_0 (Tensor) : mean of normal distribution.
+        log_sigma_0 (Tensor): log(standard deviation of normal distribution).
+        mu_1 (Float): mean of normal distribution.
+        log_sigma_1 (Float): log(standard deviation of normal distribution).
+   
+    """
+    kl = log_sigma_1 - log_sigma_0 + \
+    (torch.exp(log_sigma_0)**2 + (mu_0-mu_1)**2)/(2*math.exp(log_sigma_1)**2) - 0.5
+    return kl.sum()
 
 def _sum_to_zero(tens: torch.Tensor):
     """Take a 1d tensor and append a value causing it to sum to zero"""
     torch.cat(tens, -tens.sum())
 
-class IndBayesLinear(nn.Module):
+class _VarBayesLayer(nn.Module, metaclass=abc.ABCMeta):
+    """A base bayesian NN layer with key functions that should be overridden by
+    subclasses"""
+
+    def __init__(self, *args, **kwargs):
+        super(_VarBayesLayer, self).__init__(*args, **kwargs)
+
+    @abc.abstractmethod
+    def kl(self):
+        """Subclasses should return the KL divergence from their prior to their
+        current variational posterior."""
+        raise NotImplementedError()
+
+class IndBayesLinear(_VarBayesLayer):
     """A Bayes dense linear NN layer with allowance for separate priors for
     weights and biases. Heavily based on torchbnn.BayesLinear, which is MIT
     licensed: https://github.com/Harry24k/bayesian-neural-network-pytorch"""
@@ -55,12 +85,12 @@ class IndBayesLinear(nn.Module):
             self.register_parameter('bias_log_sigma', None)
         self.register_buffer('bias_eps', None)
 
-    def freeze(self) :
+    def freeze(self):
         self.weight_eps = torch.randn_like(self.weight_log_sigma)
         if self.bias :
             self.bias_eps = torch.randn_like(self.bias_log_sigma)
         
-    def unfreeze(self) :
+    def unfreeze(self):
         self.weight_eps = None
         if self.bias :
             self.bias_eps = None
@@ -80,6 +110,14 @@ class IndBayesLinear(nn.Module):
             bias = None
             
         return F.linear(input, weight, bias)
+    
+    def kl(self):
+        kl = _kl_gaussian(self.weight_mu, self.weight_log_sigma, 
+                          self.weight_prior_mu, self.weight_prior_log_sigma)
+        if self.bias:
+            kl += _kl_gaussian(self.bias_mu, self.bias_log_sigma, 
+                               self.bias_prior_mu, self.bias_prior_log_sigma)
+        return kl
 
 # class MNBayesLinear(nn.Module):
 #     """A Bayes dense linear NN layer that operates in a very similar way to

@@ -2,6 +2,23 @@ import torch
 import torchbnn as bnn
 from torch import nn
 import torch.nn.init as init
+import math
+
+from .linear import _VarBayesLayer
+
+class KLLoss(nn.Module):
+
+    def __init__(self):
+        super(KLLoss, self).__init__()
+
+    def forward(self, model):
+        kl_sum = torch.Tensor([0])
+
+        for m in model.modules():
+            if isinstance(m, (_VarBayesLayer,)):
+                kl_sum += m.kl()
+        
+        return kl_sum
 
 class GaussianLoss(nn.Module):
 
@@ -66,7 +83,7 @@ class BayesianLoss(nn.Module):
     def __init__(self):
         super(BayesianLoss, self).__init__()
         self._likelihood = GaussianLoss()
-        self._prior_kl = bnn.BKLLoss(reduction="sum")
+        self._prior_kl = KLLoss()
         self.logsigma = nn.Parameter(torch.Tensor(1))
     
     def forward(self, model, input, target):
@@ -77,7 +94,7 @@ class NetworkBayesianLoss(nn.Module):
     def __init__(self):
         super(NetworkBayesianLoss, self).__init__()
         self._likelihood = NetworkGaussianLoss()
-        self._prior_kl = bnn.BKLLoss(reduction="sum")
+        self._prior_kl = KLLoss()
     
     def forward(self, model, mean_est, sd_est, target):
         return self._prior_kl(model) + self._likelihood(mean_est, sd_est, target)
