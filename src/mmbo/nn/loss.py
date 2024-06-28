@@ -2,7 +2,6 @@ import torch
 import torchbnn as bnn
 from torch import nn
 import torch.nn.init as init
-import math
 
 from .linear import _VarBayesLayer
 

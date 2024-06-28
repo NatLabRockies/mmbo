@@ -49,8 +49,9 @@ class IndBayesLinear(_VarBayesLayer):
                      'in_features', 'out_features']
 
     def __init__(self, in_features, out_features,
-                 weight_prior_mu=0, weight_prior_sigma=1,
-                 bias=True, bias_prior_mu=0, bias_prior_sigma=1):
+                 weight_prior_mu = 0, weight_prior_sigma = 1,
+                 bias = True, bias_prior_mu = 0, bias_prior_sigma = 1,
+                 initialize = True):
         super(IndBayesLinear, self).__init__()
 
         self.in_features = in_features
@@ -85,6 +86,9 @@ class IndBayesLinear(_VarBayesLayer):
             self.register_parameter('bias_log_sigma', None)
         self.register_buffer('bias_eps', None)
 
+        if initialize:
+            self.initialize_()
+
     def freeze(self):
         self.weight_eps = torch.randn_like(self.weight_log_sigma)
         if self.bias :
@@ -118,6 +122,14 @@ class IndBayesLinear(_VarBayesLayer):
             kl += _kl_gaussian(self.bias_mu, self.bias_log_sigma, 
                                self.bias_prior_mu, self.bias_prior_log_sigma)
         return kl
+    
+    @torch.no_grad
+    def initialize_(self):
+        self.weight_log_sigma.uniform_(0, self.weight_prior_sigma).log_()
+        init.normal_(self.weight_mu, mean = self.weight_prior_mu, std = self.weight_prior_sigma)
+        if self.bias:
+            self.bias_log_sigma.uniform_(0, self.bias_prior_sigma).log_()
+            init.normal_(self.bias_mu, mean = self.bias_prior_mu, std = self.bias_prior_sigma)
 
 # class MNBayesLinear(nn.Module):
 #     """A Bayes dense linear NN layer that operates in a very similar way to
