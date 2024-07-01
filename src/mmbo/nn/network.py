@@ -56,7 +56,7 @@ class TIBNN(nn.Module):
         self._chain = nn.Sequential()
         for i in range(depth-1):
             self._chain.append(IndBayesLinear(width, width, weight_prior_sigma = 1 / math.sqrt(width)))
-            self._chain.append(nn.Tanh)
+            self._chain.append(nn.Tanh())
 
     @classmethod
     def from_data(cls, X_norm, Y_norm, width, depth = 1,
