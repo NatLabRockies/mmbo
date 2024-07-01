@@ -13,6 +13,8 @@ class TIBNN(nn.Module):
                  out_means = None, out_stds = None,
                  sigma_prior_median = 0.1, sigma_prior_scale = 10):
         
+        super().__init__()
+
         if feature_means is None:
             feature_means = torch.zeros(n_feat)
         if feature_stds is None:
