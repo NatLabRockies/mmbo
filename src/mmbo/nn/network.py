@@ -29,7 +29,7 @@ class TIBNN(nn.Module):
         if width < 1:
             raise ValueError("width must be at least one")
 
-        sigma_raw_median = math.expm1(math.exp(sigma_prior_median))
+        sigma_raw_median = math.log(math.expm1(sigma_prior_median))
         sigma_raw_scale = math.log(math.sqrt(sigma_prior_scale))
 
         self._input = nn.Sequential(
