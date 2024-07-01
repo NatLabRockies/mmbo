@@ -10,7 +10,7 @@ class TIBNN(nn.Module):
 
     def __init__(self, n_feat, n_out, width, depth = 1,
                  feature_means = None, feature_stds = None,
-                 out_means = None, out_stds = None,
+                 out_means = None, out_stds = None, output_sigma = False,
                  sigma_prior_median = 0.1, sigma_prior_scale = 10):
         
         super().__init__()
@@ -38,20 +38,27 @@ class TIBNN(nn.Module):
             nn.Tanh()
         )
 
-        self._output = Parallel(
-            Parallel.tuple(),
-            # Mean component
-            nn.Sequential(
+        if output_sigma:
+            self._output = Parallel(
+                Parallel.tuple(),
+                # Mean component
+                nn.Sequential(
+                    IndBayesLinear(width, n_out, weight_prior_sigma = 1 / math.sqrt(width)),
+                    UnNormalizer(out_means, out_stds)
+                ),
+                # SD Component
+                nn.Sequential(
+                    IndBayesLinear(width, n_out, weight_prior_sigma = sigma_raw_scale / math.sqrt(width),
+                                bias_prior_mu = sigma_raw_median, bias_prior_sigma = sigma_raw_scale),
+                    UnNormalizer(torch.zeros(n_out), out_stds),
+                    nn.Softplus()
+                )
+            )
+        else:
+            self._output = nn.Sequential(
                 IndBayesLinear(width, n_out, weight_prior_sigma = 1 / math.sqrt(width)),
                 UnNormalizer(out_means, out_stds)
-            ),
-            # SD Component
-            nn.Sequential(
-                IndBayesLinear(width, n_out, weight_prior_sigma = sigma_raw_scale / math.sqrt(width),
-                               bias_prior_mu = sigma_raw_median, bias_prior_sigma = sigma_raw_scale),
-                nn.Softplus()
             )
-        )
 
         self._chain = nn.Sequential()
         for i in range(depth-1):
