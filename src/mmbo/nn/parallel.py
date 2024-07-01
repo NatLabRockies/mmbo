@@ -12,13 +12,13 @@ class Parallel(nn.Module):
     """
 
     def __init__(self, combine, *modules: nn.Module):
-        super(Parallel, self).__init__()
+        super().__init__()
         self._combine = combine
-        self._modules = nn.ModuleList(modules)
+        self._components = nn.ModuleList(modules)
 
     def forward(self, input):
         outputs = []
-        for mod in self._modules:
+        for mod in self._components:
             outputs.append(mod.forward(input))
         return self._combine(outputs)
 
