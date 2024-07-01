@@ -14,7 +14,7 @@ class Parallel(nn.Module):
     def __init__(self, combine, *modules: nn.Module):
         super(Parallel, self).__init__()
         self._combine = combine
-        self._modules = modules
+        self._modules = nn.ModuleList(modules)
 
     def forward(self, input):
         outputs = []

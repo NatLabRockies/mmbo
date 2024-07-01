@@ -1,66 +1,75 @@
 import torch
-import torchbnn as bnn
 from torch import nn
+import math
+from .normalizer import Normalizer, UnNormalizer
+from .activation import MeanSD
+from .parallel import Parallel
+from .linear import IndBayesLinear
 
+class TIBNN(nn.Module):
 
-#TODO: out of date, redo when we decide what kind of error structure we want to use.
-class GaussianNetwork(nn.Module):
-    """
-    Neural Network model with a mix of frequentist and Bayesian layers.
-    Hidden layers are ordered frequentist first, then bayesian
-    """
-    def __init__(self, num_feat, width, freq_layers, bayes_layers, num_out, act=nn.LeakyReLU, prior_mu=0, prior_sigma=1, **kwargs):
-        super(GaussianNetwork, self).__init__(**kwargs)
+    def __init__(self, n_feat, n_out, width, depth = 1,
+                 feature_means = None, feature_stds = None,
+                 out_means = None, out_stds = None,
+                 sigma_prior_median = 0.1, sigma_prior_scale = 10):
+        
+        if feature_means is None:
+            feature_means = torch.zeros(n_feat)
+        if feature_stds is None:
+            feature_stds = torch.ones(n_feat)
+        if out_means is None:
+            out_means = torch.zeros(n_out)
+        if out_stds is None:
+            out_stds = torch.ones(n_out)
 
-        # Copy params into self
-        self._num_feat = num_feat
-        self._width = width
-        if freq_layers < 0 or bayes_layers < 0 or (freq_layers + bayes_layers) <= 0:
-            raise Exception("Not enough layers.")
-        self._freq_layers = freq_layers
-        self._bayes_layers = bayes_layers
-        self._num_out = num_out
-        self._act = act
-        self._prior_mu = prior_mu
-        self._prior_sigma = prior_sigma
+        if depth < 1:
+            raise ValueError("depth must be at least one")
+        if width < 1:
+            raise ValueError("width must be at least one")
 
-        # Construct the chain of layers
-        # First layer
+        sigma_raw_median = math.expm1(math.exp(sigma_prior_median))
+        sigma_raw_scale = math.log(math.sqrt(sigma_prior_scale))
+
+        self._input = nn.Sequential(
+            Normalizer(feature_means, feature_stds),
+            IndBayesLinear(n_feat, width),
+            nn.Tanh()
+        )
+
+        self._output = Parallel(
+            Parallel.tuple(),
+            # Mean component
+            nn.Sequential(
+                IndBayesLinear(width, n_out, weight_prior_sigma = 1 / math.sqrt(width)),
+                UnNormalizer(out_means, out_stds)
+            ),
+            # SD Component
+            nn.Sequential(
+                IndBayesLinear(width, n_out, weight_prior_sigma = sigma_raw_scale / math.sqrt(width),
+                               bias_prior_mu = sigma_raw_median, bias_prior_sigma = sigma_raw_scale),
+                nn.Softplus()
+            )
+        )
+
         self._chain = nn.Sequential()
-        if self._freq_layers > 0:
-            self._chain.append(nn.Linear(self._num_feat, self._width))
-        else:
-            self._chain.append(
-                bnn.BayesLinear(in_features = self._num_feat, out_features = self._width,
-                                prior_mu = self._prior_mu, prior_sigma = self._prior_sigma)
-            )
-        self._chain.append(self._act())
-        # Intermediate layers
-        for _ in range(self._freq_layers - 1):
-            self._chain.append(nn.Linear(self._width, self._width))
-            self._chain.append(self._act())
-        for _ in range(self._bayes_layers - 1):
-            self._chain.append(
-                bnn.BayesLinear(in_features = self._width, out_features = self._width,
-                                prior_mu = self._prior_mu, prior_sigma = self._prior_sigma)
-            )
-            self._chain.append(self._act())
-        # Last layer
-        if self._bayes_layers > 0:
-            self._chain.append(
-                bnn.BayesLinear(in_features = self._width, out_features = self._num_out,
-                                prior_mu = self._prior_mu, prior_sigma = self._prior_sigma)
-            )
-        else:
-            self._chain.append(nn.Linear(self._width, self._num_out))
+        for i in range(depth-1):
+            self._chain.append(IndBayesLinear(width, width, weight_prior_sigma = 1 / math.sqrt(width)))
+            self._chain.append(nn.Tanh)
 
-        # Log error standard deviation
-        self._log_sigma = nn.Parameter(torch.Tensor(1))
-    
-    def forward(self, inputs):
-        return self._chain.forward(inputs)
-    
-    @property
-    def log_error_sd(self):
-        return self._log_sigma
+    @classmethod
+    def from_data(cls, X_norm, Y_norm, width, depth = 1,
+                  sigma_prior_median = 0.1, sigma_prior_scale = 10):
+        n_feat = X_norm.shape[1]
+        n_out = Y_norm.shape[1]
+        feature_means = X_norm.nanmean(dim=0)
+        feature_stds = (X_norm - feature_means).pow(2).nanmean(dim=0).sqrt()
+        out_means = Y_norm.nanmean(dim=0)
+        out_stds = (Y_norm - out_means).pow(2).nanmean(dim=0).sqrt()
+
+        return cls(n_feat, n_out, width, depth, 
+                   feature_means, feature_stds, out_means, out_stds,
+                   sigma_prior_median, sigma_prior_scale)
+
+    def forward(self, X):
+        return self._output(self._chain(self._input(X)))
 
