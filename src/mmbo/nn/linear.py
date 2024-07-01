@@ -2,7 +2,7 @@ import torch
 import torchbnn as bnn
 from torch import nn
 from torch.nn import init
-import torch.functional as F
+import torch.nn.functional as F
 import math
 import abc
 
