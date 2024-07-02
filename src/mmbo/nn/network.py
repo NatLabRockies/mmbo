@@ -81,4 +81,9 @@ class TIBNN(nn.Module):
 
     def forward(self, X):
         return self._output(self._chain(self._input(X)))
+    
+    def initialize_(self, *, prior=False):
+        for m in self.modules():
+            if isinstance(m, IndBayesLinear):
+                m.initialize_(prior=prior)
 

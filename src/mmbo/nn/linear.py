@@ -38,6 +38,14 @@ class _VarBayesLayer(nn.Module, metaclass=abc.ABCMeta):
         """Subclasses should return the KL divergence from their prior to their
         current variational posterior."""
         raise NotImplementedError()
+    
+    @abc.abstractmethod
+    def initialize_(self, *args, **kwargs):
+        """Subclasses should initialize their internal variational posterior
+        parameters to reasonable values. They can also provide additional
+        options to this function."""
+        raise NotImplementedError()
+
 
 class IndBayesLinear(_VarBayesLayer):
     """A Bayes dense linear NN layer with allowance for separate priors for
@@ -124,12 +132,19 @@ class IndBayesLinear(_VarBayesLayer):
         return kl
     
     @torch.no_grad
-    def initialize_(self):
-        self.weight_log_sigma.uniform_(0, self.weight_prior_sigma).log_()
-        init.normal_(self.weight_mu, mean = self.weight_prior_mu, std = self.weight_prior_sigma)
-        if self.bias:
-            self.bias_log_sigma.uniform_(0, self.bias_prior_sigma).log_()
-            init.normal_(self.bias_mu, mean = self.bias_prior_mu, std = self.bias_prior_sigma)
+    def initialize_(self, *, prior=False):
+        if prior:
+            self.weight_log_sigma.fill_(self.weight_prior_log_sigma)
+            self.weight_mu.fill_(self.weight_prior_mu)
+            if self.bias:
+                self.bias_log_sigma.fill_(self.bias_prior_log_sigma)
+                self.bias_mu.fill_(self.bias_prior_mu)
+        else:
+            self.weight_log_sigma.uniform_(0, self.weight_prior_sigma).log_()
+            init.normal_(self.weight_mu, mean = self.weight_prior_mu, std = self.weight_prior_sigma)
+            if self.bias:
+                self.bias_log_sigma.uniform_(0, self.bias_prior_sigma).log_()
+                init.normal_(self.bias_mu, mean = self.bias_prior_mu, std = self.bias_prior_sigma)
 
 # class MNBayesLinear(nn.Module):
 #     """A Bayes dense linear NN layer that operates in a very similar way to
