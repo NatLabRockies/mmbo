@@ -12,10 +12,12 @@ include-package-data = true
 name = "mmbo"
 version = "0.0.1"
 dependencies = [
-	"scikit-learn",
-	"scipy",
 	"numpy",
 	"pandas",
+	"pyro-ppl",
+	"scikit-learn",
+	"scipy",
+	"torch",
 ]
 authors = [
 	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
