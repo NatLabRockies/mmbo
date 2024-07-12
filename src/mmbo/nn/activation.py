@@ -1,5 +1,10 @@
 import torch
 from torch import nn
+import pyro.distributions.transforms as tform
+from pyro.nn import PyroModule, PyroSample
+import pyro.distributions as dist
+
+__all__ = ["MeanSD", "LearnTanh", "bayestanh"]
 
 class MeanSD(nn.Module):
     """Activation function for the final layer of a Gaussian loss NN. Splits the final
@@ -14,3 +19,19 @@ class MeanSD(nn.Module):
     def forward(self, input):
         split_input = torch.chunk(input, 2, self._split_dim)
         return (split_input[0], self._softplus(split_input[1]))
+
+class LearnTanh(nn.Module):
+    """A Tanh activation function module with a learnable scale parameter."""
+    def __init__(self):
+        super().__init__()
+        self.logscale = nn.Parameter(torch.Tensor(1))
+        self.tanh = nn.Tanh()
+    
+    def forward(self, input):
+        return self.tanh(self.logscale.exp() * input)
+    
+def bayestanh(scale_prior):
+    tanh = PyroModule[LearnTanh]()
+    log_scale_prior = dist.TransformedDistribution(scale_prior, tform.ExpTransform().inv)
+    tanh.logscale = PyroSample(log_scale_prior)
+    return tanh

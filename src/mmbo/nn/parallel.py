@@ -1,5 +1,8 @@
 import torch
 from torch import nn
+import pyro.nn as pnn
+
+__all__ = ["Parallel", "PyroParallel"]
 
 class Parallel(nn.Module):
     """Container module that applies its consituent modules in parallel to
@@ -44,4 +47,4 @@ class Parallel(nn.Module):
     def tuple():
         return tuple
     
-
+PyroParallel = pnn.PyroModule[Parallel]

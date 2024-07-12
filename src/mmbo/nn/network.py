@@ -1,19 +1,32 @@
 import torch
 from torch import nn
 import math
-from .normalizer import Normalizer, UnNormalizer
-from .activation import MeanSD
-from .parallel import Parallel
-from .linear import IndBayesLinear
+from pyro.nn import PyroModule, PyroSample
+import pyro.distributions as dist
+import pyro
 
-class TIBNN(nn.Module):
+from .linear import bayeslinear
+from .activation import bayestanh
+from .normalizer import PyroNormalizer, PyroUnNormalizer
+
+__all__ = ["TIBNN"]
+
+class TIBNN(PyroModule):
 
     def __init__(self, n_feat, n_out, width, depth = 1,
                  feature_means = None, feature_stds = None,
-                 out_means = None, out_stds = None, output_sigma = False,
-                 sigma_prior_median = 0.1, sigma_prior_scale = 10):
+                 out_means = None, out_stds = None):
         
         super().__init__()
+
+        if depth < 1:
+            raise ValueError("depth must be at least one")
+        if width < 1:
+            raise ValueError("width must be at least one")
+
+        # Save the dimensions for easy reference
+        self._n_feat = n_feat
+        self._n_out = n_out
 
         if feature_means is None:
             feature_means = torch.zeros(n_feat)
@@ -24,66 +37,51 @@ class TIBNN(nn.Module):
         if out_stds is None:
             out_stds = torch.ones(n_out)
 
-        if depth < 1:
-            raise ValueError("depth must be at least one")
-        if width < 1:
-            raise ValueError("width must be at least one")
-
-        sigma_raw_median = math.log(math.expm1(sigma_prior_median))
-        sigma_raw_scale = math.log(math.sqrt(sigma_prior_scale))
-
-        self._input = nn.Sequential(
-            Normalizer(feature_means, feature_stds),
-            IndBayesLinear(n_feat, width),
-            nn.Tanh()
+        self._norm = PyroNormalizer(feature_means, feature_stds)
+        self._unnorm = PyroUnNormalizer(out_means, out_stds)
+        
+        # First layer: features -> hidden
+        self._chain = PyroModule[nn.Sequential](
+            bayeslinear(n_feat, width, 
+                        weight_prior = dist.Normal(0, 1 / math.sqrt(n_feat)), 
+                        bias_prior = dist.Normal(0, 1)),
+            bayestanh(dist.HalfCauchy(1))
         )
-
-        if output_sigma:
-            self._output = Parallel(
-                Parallel.tuple(),
-                # Mean component
-                nn.Sequential(
-                    IndBayesLinear(width, n_out, weight_prior_sigma = 1 / math.sqrt(width)),
-                    UnNormalizer(out_means, out_stds)
-                ),
-                # SD Component
-                nn.Sequential(
-                    IndBayesLinear(width, n_out, weight_prior_sigma = sigma_raw_scale / math.sqrt(width),
-                                bias_prior_mu = sigma_raw_median, bias_prior_sigma = sigma_raw_scale),
-                    UnNormalizer(torch.zeros(n_out), out_stds),
-                    nn.Softplus()
-                )
+        # Inner layers: hidden -> hidden
+        for _ in range(depth-1):
+            self._chain.append(
+                bayeslinear(width, width, 
+                            weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
+                            bias_prior = dist.Normal(0, 1))
             )
-        else:
-            self._output = nn.Sequential(
-                IndBayesLinear(width, n_out, weight_prior_sigma = 1 / math.sqrt(width)),
-                UnNormalizer(out_means, out_stds)
-            )
+            self._chain.append(bayestanh(dist.HalfCauchy(1)))
+        # Last layer: hidden -> output
+        self._chain.append(
+            bayeslinear(width, n_out, 
+                        weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
+                        bias = False)
+        ) 
 
-        self._chain = nn.Sequential()
-        for i in range(depth-1):
-            self._chain.append(IndBayesLinear(width, width, weight_prior_sigma = 1 / math.sqrt(width)))
-            self._chain.append(nn.Tanh())
+        #self.sigma = PyroSample(dist.HalfCauchy(1).expand((1,)).to_event(1))
+        self.sigma = PyroSample(dist.HalfCauchy(1))
 
     @classmethod
-    def from_data(cls, X_norm, Y_norm, width, depth = 1, output_sigma = False,
-                  sigma_prior_median = 0.1, sigma_prior_scale = 10):
+    def from_data(cls, X_norm, Y_norm, *args, **kwargs):
         n_feat = X_norm.shape[1]
         n_out = Y_norm.shape[1]
-        feature_means = X_norm.nanmean(dim=0)
-        feature_stds = (X_norm - feature_means).pow(2).nanmean(dim=0).sqrt()
-        out_means = Y_norm.nanmean(dim=0)
-        out_stds = (Y_norm - out_means).pow(2).nanmean(dim=0).sqrt()
 
-        return cls(n_feat, n_out, width, depth, 
-                   feature_means, feature_stds, out_means, out_stds,
-                   output_sigma, sigma_prior_median, sigma_prior_scale)
+        net = cls(n_feat, n_out, *args, **kwargs)
+        net._norm = PyroNormalizer.from_data(X_norm)
+        net._unnorm = PyroUnNormalizer.from_data(Y_norm)
 
-    def forward(self, X):
-        return self._output(self._chain(self._input(X)))
-    
-    def initialize_(self, *, prior=False):
-        for m in self.modules():
-            if isinstance(m, IndBayesLinear):
-                m.initialize_(prior=prior)
+        return net
 
+    def forward(self, X, y=None):
+        mu = pyro.deterministic("mu", self._unnorm(self._chain(self._norm(X))), event_dim = 1)
+
+        sigma = self.sigma
+
+        with pyro.plate_stack("data", mu.shape[:-1], rightmost_dim=-1):
+            obs = pyro.sample("obs", dist.Normal(mu, sigma).to_event(1), obs=y)
+
+        return mu
