@@ -63,7 +63,3 @@ def OrderedNormal(n, *args, **kwargs):
         OrderedUniform(n),
         transforms.CumulativeDistributionTransform(dist.Normal(*args, **kwargs)).inv
     )
-
-d = OrderedNormal(9, 0, 1)
-
-print(d.sample((10000,)).mean(dim=0))
