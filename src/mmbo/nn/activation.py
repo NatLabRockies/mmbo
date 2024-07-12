@@ -31,7 +31,8 @@ class LearnTanh(nn.Module):
         return self.tanh(self.logscale.exp() * input)
     
 def bayestanh(scale_prior):
+    """Factory producing Bayesian version of the LearnTanh module with a
+    user-specified prior."""
     tanh = PyroModule[LearnTanh]()
-    log_scale_prior = dist.TransformedDistribution(scale_prior, tform.ExpTransform().inv)
-    tanh.logscale = PyroSample(log_scale_prior)
+    tanh.scale = PyroSample(scale_prior)
     return tanh
