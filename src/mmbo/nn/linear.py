@@ -26,5 +26,5 @@ def bayeslinear(*args, weight_prior, bias_prior = None, **kwargs):
     if bl.bias is not None:
         if bias_prior is None:
             raise ValueError("Must supply a bias prior if Linear layer has bias.")
-        bl.bias = PyroSample(_expand_dist_to_shape(bias_prior, bl.bias_shape))
+        bl.bias = PyroSample(_expand_dist_to_shape(bias_prior, bl.bias.shape))
     return bl
