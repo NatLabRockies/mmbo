@@ -21,6 +21,8 @@ def _expand_dist_to_shape(dist, goal_shape):
     return dist.expand(goal_batch_shape).to_event(len(goal_batch_shape))
 
 def bayeslinear(*args, weight_prior, bias_prior = None, **kwargs):
+    """Factory producing Bayesian fully-connected linear NN layers, with
+    the user-specified prior on weights/biases."""
     bl = PyroModule[nn.Linear](*args, **kwargs)
     bl.weight = PyroSample(_expand_dist_to_shape(weight_prior, bl.weight.shape))
     if bl.bias is not None:

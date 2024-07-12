@@ -12,6 +12,25 @@ from .normalizer import PyroNormalizer, PyroUnNormalizer
 __all__ = ["TIBNN"]
 
 class TIBNN(PyroModule):
+    """Truncated Infinite Bayesian Neural Netowork (TIBNN)
+    
+    A class approximating an infinite-width Bayesian neural network by using the priors
+    described in Neal (1996) and Lee et al (2018). The prior variance of the weights 
+    exiting a layer of width N have variance 1/N. In the limit as N->infinity, this produces
+    a Gaussian Process.
+
+    Parameters:
+    n_feat = feature dimension of input. The right-most tensor dimension *must* have this length, i.e.,
+        a 1d tensor is assumed to be a single observation rather than a vector of 1d observations. A 
+        vector of 1d observations should be passed in as a k-by-1 tensor.
+    n_out = dimension of output. Same caveat about dimension as n_feat.
+    width = width of each hidden layer
+    depth = number of hidden layers
+    feature_means, feature_stds = used to normalize input before passing through network
+    out_means, out_stds = used to un-normalize output after coming out of the network. Having these
+        norm/unnorm layers in the network lets the Bayesian layers work with observations that are
+        all mean zero variance one, which is much nicer statistically.
+    """
 
     def __init__(self, n_feat, n_out, width, depth = 1,
                  feature_means = None, feature_stds = None,
@@ -67,6 +86,8 @@ class TIBNN(PyroModule):
 
     @classmethod
     def from_data(cls, X_norm, Y_norm, *args, **kwargs):
+        """Construct a TIBNN network, automatically creating the pre- and post-
+        normalization layers from the empirical mean and std dev of the provided data."""
         n_feat = X_norm.shape[1]
         n_out = Y_norm.shape[1]
 

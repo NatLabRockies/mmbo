@@ -59,6 +59,9 @@ class OrderedUniform(TorchDistribution):
         return torch.ones(value.shape[:-1]) * self.lognfact
 
 def OrderedNormal(n, *args, **kwargs):
+    """Function returning a transformed OrderedUniform distribution with the 
+    inverse normal CDF - resulting in a joint distribution of the order 
+    statistics of the normal distribution."""
     return dist.TransformedDistribution(
         OrderedUniform(n),
         transforms.CumulativeDistributionTransform(dist.Normal(*args, **kwargs)).inv
