@@ -24,11 +24,11 @@ class LearnTanh(nn.Module):
     """A Tanh activation function module with a learnable scale parameter."""
     def __init__(self):
         super().__init__()
-        self.logscale = nn.Parameter(torch.Tensor(1))
+        self.scale = nn.Parameter(torch.Tensor(1))
         self.tanh = nn.Tanh()
     
     def forward(self, input):
-        return self.tanh(self.logscale.exp() * input)
+        return self.tanh(self.scale * input)
     
 def bayestanh(scale_prior):
     """Factory producing Bayesian version of the LearnTanh module with a

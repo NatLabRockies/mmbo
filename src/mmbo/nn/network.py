@@ -4,10 +4,12 @@ import math
 from pyro.nn import PyroModule, PyroSample
 import pyro.distributions as dist
 import pyro
+from functools import partial
 
 from .linear import bayeslinear
 from .activation import bayestanh
 from .normalizer import PyroNormalizer, PyroUnNormalizer
+from ..dist import OrderedNormal
 
 __all__ = ["TIBNN"]
 
@@ -26,13 +28,17 @@ class TIBNN(PyroModule):
     n_out = dimension of output. Same caveat about dimension as n_feat.
     width = width of each hidden layer
     depth = number of hidden layers
+    output_bias = whether the output layer should have a bias.
+    bias_ordering = whether to impose a bias ordering constraint on the hidden
+        layer nodes. This removes a kind of non-identifiability from the network.
     feature_means, feature_stds = used to normalize input before passing through network
     out_means, out_stds = used to un-normalize output after coming out of the network. Having these
         norm/unnorm layers in the network lets the Bayesian layers work with observations that are
         all mean zero variance one, which is much nicer statistically.
     """
 
-    def __init__(self, n_feat, n_out, width, depth = 1,
+    def __init__(self, n_feat, n_out, width, depth = 1, output_bias = False,
+                 bias_ordering = False,
                  feature_means = None, feature_stds = None,
                  out_means = None, out_stds = None):
         
@@ -59,11 +65,16 @@ class TIBNN(PyroModule):
         self._norm = PyroNormalizer(feature_means, feature_stds)
         self._unnorm = PyroUnNormalizer(out_means, out_stds)
         
+        if bias_ordering:
+            hidden_bias_prior = partial(OrderedNormal, width)
+        else:
+            hidden_bias_prior = dist.Normal
+
         # First layer: features -> hidden
         self._chain = PyroModule[nn.Sequential](
             bayeslinear(n_feat, width, 
                         weight_prior = dist.Normal(0, 1 / math.sqrt(n_feat)), 
-                        bias_prior = dist.Normal(0, 1)),
+                        bias_prior = hidden_bias_prior(0, 1)),
             bayestanh(dist.HalfCauchy(1))
         )
         # Inner layers: hidden -> hidden
@@ -71,14 +82,15 @@ class TIBNN(PyroModule):
             self._chain.append(
                 bayeslinear(width, width, 
                             weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
-                            bias_prior = dist.Normal(0, 1))
+                            bias_prior = hidden_bias_prior(0, 1))
             )
             self._chain.append(bayestanh(dist.HalfCauchy(1)))
         # Last layer: hidden -> output
         self._chain.append(
             bayeslinear(width, n_out, 
-                        weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
-                        bias = False)
+                        weight_prior = dist.Normal(0, 1 / math.sqrt(width)),
+                        bias = output_bias,
+                        bias_prior = dist.Normal(0, 1))
         ) 
 
         #self.sigma = PyroSample(dist.HalfCauchy(1).expand((1,)).to_event(1))
@@ -98,11 +110,12 @@ class TIBNN(PyroModule):
         return net
 
     def forward(self, X, y=None):
-        mu = pyro.deterministic("mu", self._unnorm(self._chain(self._norm(X))), event_dim = 1)
 
         sigma = self.sigma
+        _mu = self._unnorm(self._chain(self._norm(X)))
 
-        with pyro.plate_stack("data", mu.shape[:-1], rightmost_dim=-1):
+        with pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1):
+            mu = pyro.deterministic("mu", _mu, event_dim = 1)
             obs = pyro.sample("obs", dist.Normal(mu, sigma).to_event(1), obs=y)
 
         return mu
