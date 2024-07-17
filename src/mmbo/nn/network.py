@@ -5,13 +5,16 @@ from pyro.nn import PyroModule, PyroSample
 import pyro.distributions as dist
 import pyro
 from functools import partial
+import pyro.infer.autoguide as autoguide
+import pyro.poutine as poutine
 
 from .linear import bayeslinear
 from .activation import bayestanh
 from .normalizer import PyroNormalizer, PyroUnNormalizer
-from ..dist import OrderedNormal
+from ..dist import OrderedNormal, OrderedHalfNormal
 
 __all__ = ["TIBNN"]
+
 
 class TIBNN(PyroModule):
     """Truncated Infinite Bayesian Neural Netowork (TIBNN)
@@ -30,15 +33,19 @@ class TIBNN(PyroModule):
     depth = number of hidden layers
     output_bias = whether the output layer should have a bias.
     bias_ordering = whether to impose a bias ordering constraint on the hidden
-        layer nodes. This removes a kind of non-identifiability from the network.
+        layer nodes. This removes a kind of non-identifiability from the network's
+        parameters.
+    bias_positive = whether to restrict biases to a Tanh activated node
+        to be positive. This removes another kind of non-identifiability from the
+        network's parameters.
     feature_means, feature_stds = used to normalize input before passing through network
     out_means, out_stds = used to un-normalize output after coming out of the network. Having these
         norm/unnorm layers in the network lets the Bayesian layers work with observations that are
         all mean zero variance one, which is much nicer statistically.
     """
 
-    def __init__(self, n_feat, n_out, width, depth = 1, output_bias = False,
-                 bias_ordering = False,
+    def __init__(self, n_feat, n_out, width, depth = 1, output_bias = True,
+                 bias_ordering = False, bias_positive = False,
                  feature_means = None, feature_stds = None,
                  out_means = None, out_stds = None):
         
@@ -65,16 +72,21 @@ class TIBNN(PyroModule):
         self._norm = PyroNormalizer(feature_means, feature_stds)
         self._unnorm = PyroUnNormalizer(out_means, out_stds)
         
-        if bias_ordering:
-            hidden_bias_prior = partial(OrderedNormal, width)
+        # Determine the prior of the biases based on supplied constraints
+        if bias_ordering and bias_positive:
+            hidden_bias_prior = partial(OrderedHalfNormal, width)
+        elif bias_ordering:
+            hidden_bias_prior = partial(OrderedNormal, width, 0)
+        elif bias_positive:
+            hidden_bias_prior = dist.HalfNormal
         else:
-            hidden_bias_prior = dist.Normal
+            hidden_bias_prior = partial(dist.Normal, 0)
 
         # First layer: features -> hidden
         self._chain = PyroModule[nn.Sequential](
             bayeslinear(n_feat, width, 
-                        weight_prior = dist.Normal(0, 1 / math.sqrt(n_feat)), 
-                        bias_prior = hidden_bias_prior(0, 1)),
+                        weight_prior = dist.Normal(0, 1), 
+                        bias_prior = hidden_bias_prior(1)),
             bayestanh(dist.HalfCauchy(1))
         )
         # Inner layers: hidden -> hidden
@@ -82,7 +94,7 @@ class TIBNN(PyroModule):
             self._chain.append(
                 bayeslinear(width, width, 
                             weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
-                            bias_prior = hidden_bias_prior(0, 1))
+                            bias_prior = hidden_bias_prior(1))
             )
             self._chain.append(bayestanh(dist.HalfCauchy(1)))
         # Last layer: hidden -> output
@@ -119,3 +131,33 @@ class TIBNN(PyroModule):
             obs = pyro.sample("obs", dist.Normal(mu, sigma).to_event(1), obs=y)
 
         return mu
+    
+    def guide(self):
+        """Create an SVI guide that is appropriate for this instance of the model."""
+        guidelist = autoguide.AutoGuideList(self)
+
+        # Special guides for all linear layer weights and biases
+        taken = []
+        for i,mod in enumerate(self._chain):
+            if isinstance(mod, nn.Linear):
+                # Add special guides for weights and biases
+                if mod.bias is not None:
+                    bias = "_chain.{i}.bias".format(i = i)
+                    guidelist.append(
+                        autoguide.AutoMultivariateNormal(poutine.block(self, expose = [bias]))
+                    )
+                    taken.append(bias)
+                weight = "_chain.{i}.weight".format(i = i)
+                guidelist.append(
+                    autoguide.AutoLowRankMultivariateNormal(poutine.block(self, expose = [weight]))
+                )
+                taken.append(weight)
+        
+        # Diagonal normal guides for everything else
+        guidelist.append(autoguide.AutoNormal(poutine.block(self, hide = taken)))
+
+        return guidelist
+        
+
+
+
