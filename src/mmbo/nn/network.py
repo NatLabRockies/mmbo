@@ -128,7 +128,7 @@ class TIBNN(PyroModule):
 
         with pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1):
             mu = pyro.deterministic("mu", _mu, event_dim = 1)
-            obs = pyro.sample("obs", dist.Normal(mu, sigma).to_event(1), obs=y)
+            obs = pyro.sample("obs", dist.NanMaskedNormal(mu, sigma).to_event(1), obs=y)
 
         return mu
     
