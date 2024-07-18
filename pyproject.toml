@@ -30,5 +30,13 @@ classifiers = [
 	"Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+notebooks = [
+	"ipykernel",
+	"ipywidgets",
+	"matplotlib",
+	"seaborn",
+]
+
 [project.urls]
 Homepage = "https://github.nrel.gov/itaylor/mmbo"

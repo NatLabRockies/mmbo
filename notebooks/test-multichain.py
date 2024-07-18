@@ -68,8 +68,7 @@ x_test2 = x_test.reshape((*x_test.shape, 1))
 # define model and data
 
 model = TIBNN.from_data(x_train2, y_train2, width=1000, depth=1, output_bias=True,
-                        bias_ordering=False, bias_positive=False)
-
+                        bias_ordering=True, bias_positive=True)
 
 def plot_predictions2(preds):
     y_pred = preds['mu'].squeeze().T.detach().numpy().mean(axis=1)
@@ -98,7 +97,7 @@ nuts_kernel = NUTS(model, jit_compile=True, full_mass=False)
 #rwm_kernel = RandomWalkKernel(model, init_step_size=0.01)
 
 # Sample
-mcmc = MCMC(nuts_kernel, num_samples=100, warmup_steps=100, num_chains = 4)
+mcmc = MCMC(nuts_kernel, num_samples=100, warmup_steps=300, num_chains = 1)
 mcmc.run(x_train2, y_train2)
 
 print({k:mcmc.get_samples()[k].shape for k in mcmc.get_samples().keys()})
