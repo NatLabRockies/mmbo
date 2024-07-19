@@ -3,6 +3,8 @@ import importlib.resources as resources
 import pandas as pd
 import numpy as np
 
+__all__ = ["li2_energy", "be2_energy", "nice_periodic"]
+
 # Generate test functions from pandas dataframes by cubic interpolation
 def _make_tablefunc(data, xcol, default=None): 
     functions = {
@@ -16,8 +18,8 @@ def _make_tablefunc(data, xcol, default=None):
     return func
 
 # Load Li2 and Be2 energy data and create test functions
-_li2_data = pd.read_csv(resources.files().joinpath("Table_Li2.txt"), sep=r"\s+")
-_be2_data = pd.read_csv(resources.files().joinpath("Table_Be2.txt"), sep=r"\s+")
+_li2_data = pd.read_csv(resources.files("mmbo.examples").joinpath("Table_Li2.txt"), sep=r"\s+")
+_be2_data = pd.read_csv(resources.files("mmbo.examples").joinpath("Table_Be2.txt"), sep=r"\s+")
 
 li2_energy = _make_tablefunc(_li2_data, "Dist", "HF")
 be2_energy = _make_tablefunc(_be2_data, "Dist", "HF")
