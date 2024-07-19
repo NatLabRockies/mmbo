@@ -32,6 +32,7 @@ class TIBNN(PyroModule):
     width = width of each hidden layer
     depth = number of hidden layers
     output_bias = whether the output layer should have a bias.
+    residual_prior = prior for the residual standard deviation, sigma.
     bias_ordering = whether to impose a bias ordering constraint on the hidden
         layer nodes. This removes a kind of non-identifiability from the network's
         parameters.
@@ -45,6 +46,7 @@ class TIBNN(PyroModule):
     """
 
     def __init__(self, n_feat, n_out, width, depth = 1, output_bias = True,
+                 residual_prior = dist.HalfCauchy(1),
                  bias_ordering = False, bias_positive = False,
                  feature_means = None, feature_stds = None,
                  out_means = None, out_stds = None):
@@ -105,8 +107,7 @@ class TIBNN(PyroModule):
                         bias_prior = dist.Normal(0, 1))
         ) 
 
-        #self.sigma = PyroSample(dist.HalfCauchy(1).expand((1,)).to_event(1))
-        self.sigma = PyroSample(dist.HalfCauchy(1))
+        self.sigma = PyroSample(residual_prior)
 
     @classmethod
     def from_data(cls, X_norm, Y_norm, *args, **kwargs):
