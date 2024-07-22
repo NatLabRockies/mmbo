@@ -7,13 +7,14 @@ import pyro
 from functools import partial
 import pyro.infer.autoguide as autoguide
 import pyro.poutine as poutine
+from pyro.contrib.autoname import autoname, scope
 
 from .linear import bayeslinear
 from .activation import bayestanh
 from .normalizer import PyroNormalizer, PyroUnNormalizer
 from ..dist import OrderedNormal, OrderedHalfNormal
 
-__all__ = ["TIBNN"]
+__all__ = ["TIBNN", "LayeredTIBNN"]
 
 
 class TIBNN(PyroModule):
@@ -107,7 +108,7 @@ class TIBNN(PyroModule):
                         bias_prior = dist.Normal(0, 1))
         ) 
 
-        self.sigma = PyroSample(residual_prior)
+        self.sigma = PyroSample(residual_prior.expand((n_out,)).to_event(1))
 
     @classmethod
     def from_data(cls, X_norm, Y_norm, *args, **kwargs):
@@ -160,5 +161,56 @@ class TIBNN(PyroModule):
         return guidelist
         
 
+class LayeredTIBNN(PyroModule):
+    """An architecture of two TIBNN networks, layered such that the output of one
+    is concatenated to the features and passed as input to the second."""
 
+    def __init__(self, n_feat, n_out1, n_out2, *args, 
+                 feature_means = None, feature_stds = None,
+                 out1_means = None, out1_stds = None, 
+                 out2_means = None, out2_stds = None, **kwargs):
+        
+        super().__init__()
 
+        self._first = TIBNN(n_feat, n_out1, *args, 
+                            feature_means = feature_means, feature_stds = feature_stds,
+                            out_means = out1_means, out_stds = out1_stds, **kwargs)
+        if feature_means is None or out1_means is None:
+            feature2_means = None
+        else:
+            feature2_means = torch.cat((feature_means, out1_means), dim = -1)
+        if feature_stds is None or out1_stds is None:
+            feature2_stds = None
+        else:
+            feature2_stds = torch.cat((feature_stds, out1_stds), dim = -1)
+        self._second = TIBNN(n_feat + n_out1, n_out2, *args,
+                             feature_means = feature2_means, feature_stds = feature2_stds,
+                             out_means = out2_means, out_stds = out2_stds, **kwargs)
+
+    @classmethod
+    def from_data(cls, X_norm, Y1_norm, Y2_norm, *args, **kwargs):
+        """Construct a LayeredTIBNN network, automatically creating the pre- and post-
+        normalization layers from the empirical mean and std dev of the provided data."""
+        n_feat = X_norm.shape[1]
+        n_out1 = Y1_norm.shape[1]
+        n_out2 = Y2_norm.shape[1]
+
+        net = cls(n_feat, n_out1, n_out2, *args, **kwargs)
+
+        net._first._norm = PyroNormalizer.from_data(X_norm)
+        net._first._unnorm = PyroUnNormalizer.from_data(Y1_norm)
+
+        net._second._norm = PyroNormalizer.from_data(
+            torch.cat((X_norm, Y1_norm), dim=-1)
+        )
+        net._second._unnorm = PyroUnNormalizer.from_data(Y2_norm)
+
+        return net
+    
+    def forward(self, X, y1=None, y2=None):
+        with scope(prefix = "_first"):
+            first_mu = self._first(X, y1)
+        last_input = torch.cat((X, first_mu), dim=-1)
+        with scope(prefix = "_second"):
+            last_mu = self._second(last_input, y2)
+        return last_mu
