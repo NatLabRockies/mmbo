@@ -6,6 +6,8 @@ from pyro.distributions import transforms
 
 __all__ = ["OrderedNormal", "OrderedHalfNormal"]
 
+# Constraints and transforms for the distributions contained in this file
+
 class _SoftPlusPositiveOrderedVector(constraints.Constraint):
     """
     Constrains to a positive real-valued tensor where the elements are monotonically
@@ -22,6 +24,9 @@ softplus_positive_ordered_vector = _SoftPlusPositiveOrderedVector()
 def _transform_to_softplus_positive_ordered_vector(constraint):
     return transforms.ComposeTransform([transforms.OrderedTransform(), transforms.SoftplusTransform()])
 
+real_matrix = constraints.independent(constraints.real, 2)
+
+# Distributions
 
 class OrderedNormal(TorchDistribution):
     """Distrubtion representing the joint distribution of order statistics
@@ -102,3 +107,58 @@ class OrderedHalfNormal(TorchDistribution):
             self._validate_sample(value)
         return self.basenorm.log_prob(value) + self.lognfact
 
+
+def _matrixkron(A: torch.Tensor, B: torch.Tensor):
+    """Performs the Kronecker product between two tensors only in their last
+    two dimensions, rather than doing the product in all dimensions like
+    torch.kron(). I.e., this treats the tensors like batches of matrices."""
+    batch_shape = torch.broadcast_shapes(A.shape[:-2], B.shape[:-2])
+    result_shape = (A.shape[-2] * B.shape[-2], A.shape[-1] * B.shape[-1])
+    return (A.unsqueeze(-1).unsqueeze(-3) * B.unsqueeze(-2).unsqueeze(-4)).reshape(*batch_shape, *result_shape)
+
+class MatrixNormal(TorchDistribution):
+
+    has_rsample = True
+    support = real_matrix
+    arg_constraints = {
+        "loc": real_matrix,
+        "col_scale_tril": constraints.lower_cholesky,
+        "row_scale_tril": constraints.lower_cholesky
+    }
+
+    def __init__(self, loc, row_scale_tril, col_scale_tril, validate_args = None):
+        # Validate shapes
+        event_shape = loc.shape[-2:]
+        batch_shape = torch.broadcast_shapes(
+            loc.shape[:-2], row_scale_tril.shape[:-2], col_scale_tril[:-2]
+        )
+        assert row_scale_tril.shape[-2:] == (event_shape[0],) * 2
+        assert col_scale_tril.shape[-2:] == (event_shape[1],) * 2
+        
+        # Expand and store parameters
+        loc_full_shape = batch_shape + event_shape
+        row_full_shape = batch_shape + (event_shape[0],) * 2
+        col_full_shape = batch_shape + (event_shape[1],) * 2
+
+        self.loc = loc.expand(loc_full_shape)
+        self.row_scale_tril = row_scale_tril.expand(row_full_shape)
+        self.col_scale_tril = col_scale_tril.expand(col_full_shape)
+
+        self.stdnorm = dist.Normal(0,1).expand(batch_shape + event_shape).to_event(2)
+        self.basenorm = dist.MultivariateNormal(
+            loc = self.loc.reshape(batch_shape + (-1,)), # row-major order
+            scale_tril = _matrixkron(self.row_scale_tril, self.col_scale_tril)
+        )
+
+        super().__init__(batch_shape, event_shape, validate_args = validate_args)
+
+    def rsample(self, sample_shape = torch.Size()):
+        shape = self._extended_shape(sample_shape)
+        eps = self.stdnorm.sample(sample_shape)
+        return self.loc + self.row_scale_tril @ eps @ self.col_scale_tril.mT
+    
+    def log_prob(self, value):
+        if self._validate_args:
+            self._validate_sample(value)
+        result_shape = value.shape[:-2]
+        return self.basenorm.log_prob(value.reshape(*result_shape + (-1,))) # row-major order
