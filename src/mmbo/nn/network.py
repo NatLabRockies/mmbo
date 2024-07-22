@@ -59,9 +59,14 @@ class TIBNN(PyroModule):
         if width < 1:
             raise ValueError("width must be at least one")
 
-        # Save the dimensions for easy reference
+        # Save the input parameters for easy reference
         self._n_feat = n_feat
         self._n_out = n_out
+        self._width = width
+        self._depth = depth
+        self._output_bias = output_bias
+        self._bias_ordering = bias_ordering
+        self._bias_positive = bias_positive
 
         if feature_means is None:
             feature_means = torch.zeros(n_feat)
@@ -72,8 +77,8 @@ class TIBNN(PyroModule):
         if out_stds is None:
             out_stds = torch.ones(n_out)
 
-        self._norm = PyroNormalizer(feature_means, feature_stds)
-        self._unnorm = PyroUnNormalizer(out_means, out_stds)
+        self.norm = PyroNormalizer(feature_means, feature_stds)
+        self.unnorm = PyroUnNormalizer(out_means, out_stds)
         
         # Determine the prior of the biases based on supplied constraints
         if bias_ordering and bias_positive:
@@ -86,7 +91,7 @@ class TIBNN(PyroModule):
             hidden_bias_prior = partial(dist.Normal, 0)
 
         # First layer: features -> hidden
-        self._chain = PyroModule[nn.Sequential](
+        self.chain = PyroModule[nn.Sequential](
             bayeslinear(n_feat, width, 
                         weight_prior = dist.Normal(0, 1), 
                         bias_prior = hidden_bias_prior(1)),
@@ -94,14 +99,14 @@ class TIBNN(PyroModule):
         )
         # Inner layers: hidden -> hidden
         for _ in range(depth-1):
-            self._chain.append(
+            self.chain.append(
                 bayeslinear(width, width, 
                             weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
                             bias_prior = hidden_bias_prior(1))
             )
-            self._chain.append(bayestanh(dist.HalfCauchy(1)))
+            self.chain.append(bayestanh(dist.HalfCauchy(1)))
         # Last layer: hidden -> output
-        self._chain.append(
+        self.chain.append(
             bayeslinear(width, n_out, 
                         weight_prior = dist.Normal(0, 1 / math.sqrt(width)),
                         bias = output_bias,
@@ -118,48 +123,22 @@ class TIBNN(PyroModule):
         n_out = Y_norm.shape[1]
 
         net = cls(n_feat, n_out, *args, **kwargs)
-        net._norm = PyroNormalizer.from_data(X_norm)
-        net._unnorm = PyroUnNormalizer.from_data(Y_norm)
+        net.norm = PyroNormalizer.from_data(X_norm)
+        net.unnorm = PyroUnNormalizer.from_data(Y_norm)
 
         return net
 
     def forward(self, X, y=None):
 
         sigma = self.sigma
-        _mu = self._unnorm(self._chain(self._norm(X)))
+        _mu = self.unnorm(self.chain(self.norm(X)))
 
         with pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1):
             mu = pyro.deterministic("mu", _mu, event_dim = 1)
             obs = pyro.sample("obs", dist.NanMaskedNormal(mu, sigma).to_event(1), obs=y)
 
         return mu
-    
-    def guide(self):
-        """Create an SVI guide that is appropriate for this instance of the model."""
-        guidelist = autoguide.AutoGuideList(self)
 
-        # Special guides for all linear layer weights and biases
-        taken = []
-        for i,mod in enumerate(self._chain):
-            if isinstance(mod, nn.Linear):
-                # Add special guides for weights and biases
-                if mod.bias is not None:
-                    bias = "_chain.{i}.bias".format(i = i)
-                    guidelist.append(
-                        autoguide.AutoMultivariateNormal(poutine.block(self, expose = [bias]))
-                    )
-                    taken.append(bias)
-                weight = "_chain.{i}.weight".format(i = i)
-                guidelist.append(
-                    autoguide.AutoLowRankMultivariateNormal(poutine.block(self, expose = [weight]))
-                )
-                taken.append(weight)
-        
-        # Diagonal normal guides for everything else
-        guidelist.append(autoguide.AutoNormal(poutine.block(self, hide = taken)))
-
-        return guidelist
-        
 
 class LayeredTIBNN(PyroModule):
     """An architecture of two TIBNN networks, layered such that the output of one
@@ -172,9 +151,9 @@ class LayeredTIBNN(PyroModule):
         
         super().__init__()
 
-        self._first = TIBNN(n_feat, n_out1, *args, 
-                            feature_means = feature_means, feature_stds = feature_stds,
-                            out_means = out1_means, out_stds = out1_stds, **kwargs)
+        self.first = TIBNN(n_feat, n_out1, *args, 
+                           feature_means = feature_means, feature_stds = feature_stds,
+                           out_means = out1_means, out_stds = out1_stds, **kwargs)
         if feature_means is None or out1_means is None:
             feature2_means = None
         else:
@@ -183,9 +162,9 @@ class LayeredTIBNN(PyroModule):
             feature2_stds = None
         else:
             feature2_stds = torch.cat((feature_stds, out1_stds), dim = -1)
-        self._second = TIBNN(n_feat + n_out1, n_out2, *args,
-                             feature_means = feature2_means, feature_stds = feature2_stds,
-                             out_means = out2_means, out_stds = out2_stds, **kwargs)
+        self.second = TIBNN(n_feat + n_out1, n_out2, *args,
+                            feature_means = feature2_means, feature_stds = feature2_stds,
+                            out_means = out2_means, out_stds = out2_stds, **kwargs)
 
     @classmethod
     def from_data(cls, X_norm, Y1_norm, Y2_norm, *args, **kwargs):
@@ -197,20 +176,20 @@ class LayeredTIBNN(PyroModule):
 
         net = cls(n_feat, n_out1, n_out2, *args, **kwargs)
 
-        net._first._norm = PyroNormalizer.from_data(X_norm)
-        net._first._unnorm = PyroUnNormalizer.from_data(Y1_norm)
+        net.first.norm = PyroNormalizer.from_data(X_norm)
+        net.first.unnorm = PyroUnNormalizer.from_data(Y1_norm)
 
-        net._second._norm = PyroNormalizer.from_data(
+        net.second.norm = PyroNormalizer.from_data(
             torch.cat((X_norm, Y1_norm), dim=-1)
         )
-        net._second._unnorm = PyroUnNormalizer.from_data(Y2_norm)
+        net.second.unnorm = PyroUnNormalizer.from_data(Y2_norm)
 
         return net
     
     def forward(self, X, y1=None, y2=None):
-        with scope(prefix = "_first"):
-            first_mu = self._first(X, y1)
+        with scope(prefix = "first"):
+            first_mu = self.first(X, y1)
         last_input = torch.cat((X, first_mu), dim=-1)
-        with scope(prefix = "_second"):
-            last_mu = self._second(last_input, y2)
+        with scope(prefix = "second"):
+            last_mu = self.second(last_input, y2)
         return last_mu
