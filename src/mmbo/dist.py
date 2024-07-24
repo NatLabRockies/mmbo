@@ -3,8 +3,9 @@ import pyro.distributions as dist
 import torch
 from pyro.distributions import constraints
 from pyro.distributions import transforms
+import functools
 
-__all__ = ["OrderedNormal", "OrderedHalfNormal"]
+__all__ = ["OrderedNormal", "OrderedHalfNormal", "MatrixNormal"]
 
 # Constraints and transforms for the distributions contained in this file
 
@@ -130,7 +131,7 @@ class MatrixNormal(TorchDistribution):
         # Validate shapes
         event_shape = loc.shape[-2:]
         batch_shape = torch.broadcast_shapes(
-            loc.shape[:-2], row_scale_tril.shape[:-2], col_scale_tril[:-2]
+            loc.shape[:-2], row_scale_tril.shape[:-2], col_scale_tril.shape[:-2]
         )
         assert row_scale_tril.shape[-2:] == (event_shape[0],) * 2
         assert col_scale_tril.shape[-2:] == (event_shape[1],) * 2
@@ -145,12 +146,40 @@ class MatrixNormal(TorchDistribution):
         self.col_scale_tril = col_scale_tril.expand(col_full_shape)
 
         self.stdnorm = dist.Normal(0,1).expand(batch_shape + event_shape).to_event(2)
-        self.basenorm = dist.MultivariateNormal(
-            loc = self.loc.reshape(batch_shape + (-1,)), # row-major order
-            scale_tril = _matrixkron(self.row_scale_tril, self.col_scale_tril)
-        )
 
         super().__init__(batch_shape, event_shape, validate_args = validate_args)
+    
+    @property
+    def n(self):
+        return self.event_shape[0]
+    
+    @property
+    def p(self):
+        return self.event_shape[1]
+
+    @functools.cached_property
+    def V(self):
+        return self.col_scale_tril @ self.col_scale_tril.mT
+
+    @functools.cached_property
+    def V(self):
+        return self.row_scale_tril @ self.row_scale_tril.mT
+
+    @functools.cached_property
+    def V_inv(self):
+        return torch.cholesky_inverse(self.col_scale_tril)
+
+    @functools.cached_property
+    def U_inv(self):
+        return torch.cholesky_inverse(self.row_scale_tril)
+
+    @functools.cached_property
+    def V_logdet(self):
+        return 2 * self.col_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
+    
+    @functools.cached_property
+    def U_logdet(self):
+        return 2 * self.row_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
 
     def rsample(self, sample_shape = torch.Size()):
         shape = self._extended_shape(sample_shape)
@@ -160,5 +189,10 @@ class MatrixNormal(TorchDistribution):
     def log_prob(self, value):
         if self._validate_args:
             self._validate_sample(value)
-        result_shape = value.shape[:-2]
-        return self.basenorm.log_prob(value.reshape(*result_shape + (-1,))) # row-major order
+
+        normconst = torch.log(torch.tensor(2 * torch.pi)) * self.n * self.p / 2
+        trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+
+        return - trace / 2 - normconst - self.U_logdet * self.p / 2 - self.V_logdet * self.n / 2
+
+        
