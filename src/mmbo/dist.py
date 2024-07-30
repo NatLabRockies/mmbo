@@ -162,7 +162,7 @@ class MatrixNormal(TorchDistribution):
         return self.col_scale_tril @ self.col_scale_tril.mT
 
     @functools.cached_property
-    def V(self):
+    def U(self):
         return self.row_scale_tril @ self.row_scale_tril.mT
 
     @functools.cached_property
