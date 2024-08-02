@@ -1,23 +1,27 @@
+import math
+from functools import partial
+import collections
+
 import torch
 from torch import nn
-import math
+from torch.nn.functional import linear, tanh
+
 from pyro.nn import PyroModule, PyroSample
 import pyro.distributions as dist
 import pyro
-from functools import partial
 import pyro.infer.autoguide as autoguide
 import pyro.poutine as poutine
 from pyro.contrib.autoname import autoname, scope
 
-from .linear import bayeslinear
+from .linear import bayeslinear, PyroMatrixLinear
 from .activation import bayestanh
 from .normalizer import PyroNormalizer, PyroUnNormalizer
-from ..dist import OrderedNormal, OrderedHalfNormal
+from ..dist import OrderedNormal, OrderedHalfNormal, MatrixNormal
 
-__all__ = ["TIBNN", "LayeredTIBNN"]
+__all__ = ["TIBNN2", "LayeredTIBNN2"]
 
 
-class TIBNN(PyroModule):
+class TIBNN2(object):
     """Truncated Infinite Bayesian Neural Netowork (TIBNN)
     
     A class approximating an infinite-width Bayesian neural network by using the priors
@@ -32,23 +36,14 @@ class TIBNN(PyroModule):
     n_out = dimension of output. Same caveat about dimension as n_feat.
     width = width of each hidden layer
     depth = number of hidden layers
-    output_bias = whether the output layer should have a bias.
-    residual_prior = prior for the residual standard deviation, sigma.
-    bias_ordering = whether to impose a bias ordering constraint on the hidden
-        layer nodes. This removes a kind of non-identifiability from the network's
-        parameters.
-    bias_positive = whether to restrict biases to a Tanh activated node
-        to be positive. This removes another kind of non-identifiability from the
-        network's parameters.
+    prior_variance = expected residual variance, on the normalized output scale.
     feature_means, feature_stds = used to normalize input before passing through network
     out_means, out_stds = used to un-normalize output after coming out of the network. Having these
         norm/unnorm layers in the network lets the Bayesian layers work with observations that are
         all mean zero variance one, which is much nicer statistically.
     """
 
-    def __init__(self, n_feat, n_out, width, depth = 1, output_bias = True,
-                 residual_prior = dist.HalfCauchy(1),
-                 bias_ordering = False, bias_positive = False,
+    def __init__(self, n_feat, n_out, width, depth = 1, prior_variance = 0.01,
                  feature_means = None, feature_stds = None,
                  out_means = None, out_stds = None):
         
@@ -60,14 +55,11 @@ class TIBNN(PyroModule):
             raise ValueError("width must be at least one")
 
         # Save the input parameters for easy reference
-        self._n_feat = n_feat
-        self._n_out = n_out
-        self._width = width
-        self._depth = depth
-        self._output_bias = output_bias
-        self._bias_ordering = bias_ordering
-        self._bias_positive = bias_positive
-
+        self.n_feat = n_feat
+        self.n_out = n_out
+        self.width = width
+        self.depth = depth
+        self.prior_variance = prior_variance
         if feature_means is None:
             feature_means = torch.zeros(n_feat)
         if feature_stds is None:
@@ -76,44 +68,39 @@ class TIBNN(PyroModule):
             out_means = torch.zeros(n_out)
         if out_stds is None:
             out_stds = torch.ones(n_out)
+        self.feature_means = feature_means
+        self.feature_stds = feature_stds
+        self.out_means = out_means
+        self.out_stds = out_stds
 
-        self.norm = PyroNormalizer(feature_means, feature_stds)
-        self.unnorm = PyroUnNormalizer(out_means, out_stds)
-        
-        # Determine the prior of the biases based on supplied constraints
-        if bias_ordering and bias_positive:
-            hidden_bias_prior = partial(OrderedHalfNormal, width)
-        elif bias_ordering:
-            hidden_bias_prior = partial(OrderedNormal, width, 0)
-        elif bias_positive:
-            hidden_bias_prior = dist.HalfNormal
-        else:
-            hidden_bias_prior = partial(dist.Normal, 0)
+        # # First layer: features -> hidden
+        # self.chain = PyroModule[nn.Sequential](
+        #     bayeslinear(n_feat, width, 
+        #                 weight_prior = dist.Normal(0, 1), 
+        #                 bias_prior = dist.Normal(0, 1)),
+        #     bayestanh(dist.LogNormal(1, 1))
+        # )
+        # # Inner layers: hidden -> hidden
+        # for _ in range(depth-1):
+        #     self.chain.append(
+        #         bayeslinear(width, width, 
+        #                     weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
+        #                     bias_prior = dist.Normal(0, 1))
+        #     )
+        #     self.chain.append(bayestanh(dist.LogNormal(1, 1)))
 
-        # First layer: features -> hidden
-        self.chain = PyroModule[nn.Sequential](
-            bayeslinear(n_feat, width, 
-                        weight_prior = dist.Normal(0, 1), 
-                        bias_prior = hidden_bias_prior(1)),
-            bayestanh(dist.HalfCauchy(1))
-        )
-        # Inner layers: hidden -> hidden
-        for _ in range(depth-1):
-            self.chain.append(
-                bayeslinear(width, width, 
-                            weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
-                            bias_prior = hidden_bias_prior(1))
-            )
-            self.chain.append(bayestanh(dist.HalfCauchy(1)))
-        # Last layer: hidden -> output
-        self.chain.append(
-            bayeslinear(width, n_out, 
-                        weight_prior = dist.Normal(0, 1 / math.sqrt(width)),
-                        bias = output_bias,
-                        bias_prior = dist.Normal(0, 1))
-        ) 
+        # self.precision = PyroSample(dist.Wishart(df = n_out + 5, scale_tril = torch.eye(n_out) / math.sqrt(4 * prior_variance)))
 
-        self.sigma = PyroSample(residual_prior.expand((n_out,)).to_event(1))
+        # # Last layer: hidden -> output, conditional on precision matrix
+        # self.lastlayer = PyroMatrixLinear(width, n_out)
+        # colscale = torch.eye(width+1) / math.sqrt(width)
+        # colscale[1,1] = 1
+        # colscale /= math.sqrt(prior_variance)
+        # self.lastlayer.full_matrix = PyroSample(
+        #     lambda self: MatrixNormal(torch.zeros((n_out, width+1)), 
+        #                               row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(self.precision)), 
+        #                               col_scale_tril = colscale)
+        # )
 
     @classmethod
     def from_data(cls, X_norm, Y_norm, *args, **kwargs):
@@ -123,24 +110,110 @@ class TIBNN(PyroModule):
         n_out = Y_norm.shape[1]
 
         net = cls(n_feat, n_out, *args, **kwargs)
-        net.norm = PyroNormalizer.from_data(X_norm)
-        net.unnorm = PyroUnNormalizer.from_data(Y_norm)
+        norm = PyroNormalizer.from_data(X_norm)
+        unnorm = PyroUnNormalizer.from_data(Y_norm)
+        net.feature_means = norm.means
+        net.feature_stds = norm.stds
+        net.out_means = unnorm.means
+        net.out_stds = unnorm.stds
 
         return net
+    
+    @property
+    def norm(self):
+        return PyroNormalizer(self.feature_means, self.feature_stds)
+    
+    @property
+    def unnorm(self):
+        return PyroUnNormalizer(self.out_means, self.out_stds)
+    
+    @property
+    def nu0(self):
+        """Prior parameter for the precision matrix.
+        precision ~ Wishart(nu0, V0_tril @ V0_tril.mT)"""
+        return self.n_out + 5
+    
+    @property
+    def V0_tril(self):
+        """Prior parameter for the precision matrix.
+        precision ~ Wishart(nu0, V0_tril @ V0_tril.mT)"""
+        return torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance)
+    
+    @property
+    def Lambda0_tril(self):
+        """Prior parameter for last layer matrix.
+        full_matrix|precision ~ MatrixNormal(0, precision^(-1), Lambda0_tril @ Lambda0_tril.mT)
+        In full_matrix, the first column is the biases, and the remaining matrix is
+        the weights."""
+        colscale_tril = torch.eye(self.width+1) / math.sqrt(self.width)
+        colscale_tril[1,1] = 1
+        colscale_tril /= math.sqrt(self.prior_variance)
+        return colscale_tril
 
-    def forward(self, X, y=None):
+    def __call__(self, X, y=None):
 
-        sigma = self.sigma
-        _mu = self.unnorm(self.chain(self.norm(X)))
+        # Normalize data to have mean zero and variance one
+        X_normed = self.norm.norm(X)
+        if y is None:
+            y_normed = None
+        else:
+            y_normed = self.unnorm.norm(y)
 
+        # Construct network layers and pass input through them
+        activation = X_normed
+        for layer in range(1, self.depth+1):
+            insize = activation.shape[-1]
+            outsize = self.width
+            with scope(prefix = f"layer{layer}"):
+                weight = pyro.sample(
+                    "weight", 
+                    dist.Normal(0, 1 / math.sqrt(insize)).expand((outsize, insize)).to_event(2)
+                )
+                bias = pyro.sample(
+                    "bias", 
+                    dist.Normal(0, 1).expand((outsize,)).to_event(1)
+                )
+                scale = pyro.sample(
+                    "scale", 
+                    dist.LogNormal(1, 1)
+                )
+                activation = pyro.deterministic(
+                    "activation", 
+                    tanh(scale * linear(activation, weight, bias)),
+                    event_dim = 1
+                )
+
+        # Last layer
+        # Output multivariate normal precision matrix
+        # Diagonal elements of the covariance matrix (inverse of the precision 
+        # matrix) have expectation self.prior_variance
+        precision = pyro.sample(
+            "precision", 
+            dist.Wishart(self.nu0, scale_tril = self.V0_tril)
+        )
+
+        # Weights and biases with conjugate Matrix Normal prior distribution
+        with scope(prefix = "last"):
+            full_matrix = pyro.sample(
+                "full_matrix", 
+                MatrixNormal(torch.zeros((self.n_out, self.width+1)), 
+                             row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(precision)), 
+                             col_scale_tril = self.Lambda0_tril)
+            )
+            weight = pyro.deterministic("weight", full_matrix[:,1:])
+            bias = pyro.deterministic("bias", full_matrix[:,0])
+            activation = pyro.deterministic("activation", linear(activation, weight, bias), event_dim = 1)
+        
+        # Output mean and observation
+        mu_normed = activation
+        mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
         with pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1):
-            mu = pyro.deterministic("mu", _mu, event_dim = 1)
-            obs = pyro.sample("obs", dist.NanMaskedNormal(mu, sigma).to_event(1), obs=y)
+             obs = pyro.sample("obs", dist.MultivariateNormal(mu_normed, precision_matrix = precision), obs=y_normed)
 
         return mu
 
 
-class LayeredTIBNN(PyroModule):
+class LayeredTIBNN2(PyroModule):
     """An architecture of two TIBNN networks, layered such that the output of one
     is concatenated to the features and passed as input to the second."""
 
@@ -151,7 +224,7 @@ class LayeredTIBNN(PyroModule):
         
         super().__init__()
 
-        self.first = TIBNN(n_feat, n_out1, *args, 
+        self.first = TIBNN2(n_feat, n_out1, *args, 
                            feature_means = feature_means, feature_stds = feature_stds,
                            out_means = out1_means, out_stds = out1_stds, **kwargs)
         if feature_means is None or out1_means is None:
@@ -162,7 +235,7 @@ class LayeredTIBNN(PyroModule):
             feature2_stds = None
         else:
             feature2_stds = torch.cat((feature_stds, out1_stds), dim = -1)
-        self.second = TIBNN(n_feat + n_out1, n_out2, *args,
+        self.second = TIBNN2(n_feat + n_out1, n_out2, *args,
                             feature_means = feature2_means, feature_stds = feature2_stds,
                             out_means = out2_means, out_stds = out2_stds, **kwargs)
 

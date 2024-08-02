@@ -1,8 +1,8 @@
-from pyro.nn import PyroModule, PyroSample
+from pyro.nn import PyroModule, PyroSample, PyroParam
 from torch import nn
 import torch
 
-__all__ = ["bayeslinear"]
+__all__ = ["bayeslinear", "PyroMatrixLinear"]
 
 def _expand_dist_to_shape(dist, goal_shape):
     if len(goal_shape) < dist.event_dim:
@@ -30,3 +30,22 @@ def bayeslinear(*args, weight_prior, bias_prior = None, **kwargs):
             raise ValueError("Must supply a bias prior if Linear layer has bias.")
         bl.bias = PyroSample(_expand_dist_to_shape(bias_prior, bl.bias.shape))
     return bl
+
+class PyroMatrixLinear(PyroModule[nn.Linear]):
+    """A dense linear layer intended to have its full bias/weight matrix parameterized
+    as a MatrixNormal distribution."""
+    full_matrix: torch.Tensor
+
+    def __init__(self, in_features, out_features, device=None, dtype=None):
+        super().__init__(in_features, out_features, bias = True, device = device, dtype = dtype)
+        self.full_matrix = PyroParam(
+            torch.cat([self.bias.reshape((-1,1)), self.weight], dim = -1)
+        )
+
+    @property
+    def weight(self):
+        return self.full_matrix[:,1:]
+    
+    @property
+    def bias(self):
+        return self.full_matrix[:,0]
