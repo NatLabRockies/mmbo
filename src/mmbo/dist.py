@@ -133,8 +133,11 @@ class MatrixNormal(TorchDistribution):
         batch_shape = torch.broadcast_shapes(
             loc.shape[:-2], row_scale_tril.shape[:-2], col_scale_tril.shape[:-2]
         )
-        assert row_scale_tril.shape[-2:] == (event_shape[0],) * 2
-        assert col_scale_tril.shape[-2:] == (event_shape[1],) * 2
+        if (
+            (row_scale_tril.shape[-2:] != (event_shape[0],) * 2)
+            or (col_scale_tril.shape[-2:] != (event_shape[1],) * 2)
+        ):
+            raise ValueError(f"Incompatible parameter shapes: loc={loc.shape}, row_scale_tril={row_scale_tril.shape}, col_scale_tril={col_scale_tril.shape}")
         
         # Expand and store parameters
         loc_full_shape = batch_shape + event_shape

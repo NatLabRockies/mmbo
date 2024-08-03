@@ -1,5 +1,5 @@
 import math
-from functools import partial
+from functools import partial, cached_property
 import collections
 
 import torch
@@ -119,27 +119,35 @@ class TIBNN2(object):
 
         return net
     
-    @property
+    @cached_property
     def norm(self):
         return PyroNormalizer(self.feature_means, self.feature_stds)
     
-    @property
+    @cached_property
     def unnorm(self):
         return PyroUnNormalizer(self.out_means, self.out_stds)
     
-    @property
+    @cached_property
     def nu0(self):
         """Prior parameter for the precision matrix.
         precision ~ Wishart(nu0, V0_tril @ V0_tril.mT)"""
         return self.n_out + 5
     
-    @property
+    @cached_property
     def V0_tril(self):
         """Prior parameter for the precision matrix.
         precision ~ Wishart(nu0, V0_tril @ V0_tril.mT)"""
         return torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance)
     
-    @property
+    @cached_property
+    def V0(self):
+        return torch.eye(self.n_out) / (4 * self.prior_variance)
+    
+    @cached_property 
+    def V0_inv(self):
+        return torch.eye(self.n_out) * (4 * self.prior_variance)
+    
+    @cached_property
     def Lambda0_tril(self):
         """Prior parameter for last layer matrix.
         full_matrix|precision ~ MatrixNormal(0, precision^(-1), Lambda0_tril @ Lambda0_tril.mT)
@@ -149,6 +157,20 @@ class TIBNN2(object):
         colscale_tril[1,1] = 1
         colscale_tril /= math.sqrt(self.prior_variance)
         return colscale_tril
+    
+    @cached_property
+    def Lambda0(self):
+        mat = torch.eye(self.width + 1) / self.width
+        mat[1,1] = 1
+        mat /= self.prior_variance
+        return mat
+    
+    @cached_property
+    def Lambda0_inv(self):
+        mat = torch.eye(self.width + 1) * self.width
+        mat[1,1] = 1
+        mat *= self.prior_variance
+        return mat
 
     def __call__(self, X, y=None):
 
@@ -158,6 +180,10 @@ class TIBNN2(object):
             y_normed = None
         else:
             y_normed = self.unnorm.norm(y)
+
+        # Plate to reuse throughout
+        def data_plate():
+            return pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1)
 
         # Construct network layers and pass input through them
         activation = X_normed
@@ -177,11 +203,12 @@ class TIBNN2(object):
                     "scale", 
                     dist.LogNormal(1, 1)
                 )
-                activation = pyro.deterministic(
-                    "activation", 
-                    tanh(scale * linear(activation, weight, bias)),
-                    event_dim = 1
-                )
+                with data_plate():
+                    activation = pyro.deterministic(
+                        "activation", 
+                        tanh(scale * linear(activation, weight, bias)),
+                        event_dim = 1
+                    )
 
         # Last layer
         # Output multivariate normal precision matrix
@@ -202,12 +229,13 @@ class TIBNN2(object):
             )
             weight = pyro.deterministic("weight", full_matrix[:,1:])
             bias = pyro.deterministic("bias", full_matrix[:,0])
-            activation = pyro.deterministic("activation", linear(activation, weight, bias), event_dim = 1)
+            with data_plate():
+                activation = pyro.deterministic("activation", linear(activation, weight, bias), event_dim = 1)
         
         # Output mean and observation
         mu_normed = activation
-        mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
-        with pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1):
+        with data_plate():
+             mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
              obs = pyro.sample("obs", dist.MultivariateNormal(mu_normed, precision_matrix = precision), obs=y_normed)
 
         return mu
