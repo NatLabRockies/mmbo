@@ -15,6 +15,28 @@ from .activation import LearnTanh
 
 __all__ = ["TIBNN2Guide"]
 
+
+def _woodbury_inv(A_inv, X, C_inv = None):
+    """Inverts a matrix of the form M = (A + X^T * C * X) using a simplified
+    Woodbury identity,
+    M^(-1) = A^(-1) - A^(-1) * X^T * (C^(-1) + X * A^(-1) * X^T)^(-1) * X * A^(-1)
+    or
+    M^(-1) = A^(-1) - A^(-1) * X^T * (I + X * A^(-1) * X^T)^(-1) * X * A^(-1)
+    if C is the identity matrix. Omitting C_inv (C_inv = None) implies C = I.
+    A is p-by-p, X is n-by-p, and C is n-by-n. If n < p (X is wide), this is 
+    faster than directly inverting M because only a n-by-n matrix needs to be 
+    inverted rather than a p-by-p matrix.
+    Notice that only the inverses of A and C are required in the formula so this
+    function accepts a precomputed A_inv and C_inv.
+    """
+    if C_inv is None:
+        # C is the identity, auto-generate C_inv = I
+        n = X.shape[-2]
+        smaller_inv = torch.linalg.inv(torch.eye(n) + X @ A_inv @ X.mT)
+    else:
+        smaller_inv = torch.linalg.inv(C_inv + X @ A_inv @ X.mT)
+    return A_inv - A_inv @ X.mT @ smaller_inv @ X @ A_inv
+
 class MNBayesLinearGuide(PyroModule):
     # Serves as a guide for Bayesian linear layers
 
@@ -100,13 +122,18 @@ class TIBNN2Guide(object):
     """A custom guide for TIBNN models that captures the kinds of posterior dependence
     that matters for the model's predictive abilities."""
 
-    def __init__(self, model: TIBNN2, X: torch.Tensor, Y: torch.Tensor):
+    def __init__(self, model: TIBNN2, X: torch.Tensor, Y: torch.Tensor, 
+                 init_style = "prior"):
         self.model = model
         self.X = X
         self.Y = Y
         self.X_normed = self.model.norm.norm(X)
         self.Y_normed = self.model.unnorm.norm(Y)
         self.n = X.shape[:-1].numel()
+        if init_style in ["prior","random"]:
+            self.init_style = init_style
+        else:
+            raise ValueError(f"Invalid value '{init_style}' for init_style")
 
     def lastlayer_posterior(self, X, Y):
         """Posterior parameter of precision matrix.
@@ -162,17 +189,33 @@ class TIBNN2Guide(object):
 
     def __call__(self, *args, **kwargs):
 
-        # Construct network layers and pass input through them
+        # Construct all but last network layers and pass input through them
         activation = self.X_normed
         for layer in range(1, self.model.depth+1):
             insize = activation.shape[-1]
             outsize = self.model.width
-            weight_loc = pyro.param(f"layer{layer}/weight_loc", torch.randn((outsize, insize)) / math.sqrt(insize))
-            weight_scale = pyro.param(f"layer{layer}/weight_scale", torch.ones((outsize, insize)) / (math.sqrt(self.n * insize)))
-            bias_loc = pyro.param(f"layer{layer}/bias_loc", torch.randn((outsize,)))
-            bias_scale = pyro.param(f"layer{layer}/bias_scale", torch.ones((outsize,)) / math.sqrt(self.n))
-            scale_loc = pyro.param(f"layer{layer}/scale_loc", dist.Normal(1, 1).sample())
-            scale_scale = pyro.param(f"layer{layer}/scale_scale", torch.tensor(1 / math.sqrt(self.n)))
+            # Find initial values for parameters
+            if self.init_style == "prior":
+                weight_loc_init = torch.zeros((outsize, insize))
+                weight_scale_init = torch.ones((outsize, insize)) / math.sqrt(insize)
+                bias_loc_init = torch.zeros((outsize,))
+                bias_scale_init = torch.ones((outsize,))
+                scale_loc_init = torch.tensor(1.0)
+                scale_scale_init = torch.tensor(1.0)
+            else:
+                weight_loc_init = torch.randn((outsize, insize)) / math.sqrt(insize)
+                weight_scale_init = torch.ones((outsize, insize)) / (math.sqrt(self.n * insize))
+                bias_loc_init = torch.randn((outsize,))
+                bias_scale_init = torch.ones((outsize,)) / math.sqrt(self.n)
+                scale_loc_init = dist.Normal(1, 1).sample()
+                scale_scale_init = torch.tensor(1 / math.sqrt(self.n))
+            # Set parameter values
+            weight_loc = pyro.param(f"layer{layer}/weight_loc", weight_loc_init)
+            weight_scale = pyro.param(f"layer{layer}/weight_scale", weight_scale_init, constraint = constraints.positive)
+            bias_loc = pyro.param(f"layer{layer}/bias_loc", bias_loc_init)
+            bias_scale = pyro.param(f"layer{layer}/bias_scale", bias_scale_init, constraint = constraints.positive)
+            scale_loc = pyro.param(f"layer{layer}/scale_loc", scale_loc_init)
+            scale_scale = pyro.param(f"layer{layer}/scale_scale", scale_scale_init, constraint = constraints.positive)
             with scope(prefix = f"layer{layer}"):
                 #weight = pyro.sample("weight", dist.Delta(weight_loc, event_dim=2))
                 weight = pyro.sample("weight", dist.Normal(weight_loc, weight_scale).to_event(2))
