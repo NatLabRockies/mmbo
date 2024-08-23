@@ -1,6 +1,7 @@
 from torch.distributions.constraint_registry import biject_to
 import torch.distributions.constraints as constraints
 import torch.distributions.transforms as transforms
+import torch.distributions.utils as utils
 import torch
 import math
 import logging
@@ -13,11 +14,32 @@ try:
     _ = biject_to(constraints.lower_cholesky)
 except NotImplementedError:
     class LowerCholeskyTransform(transforms.LowerCholeskyTransform):
+        """
+        Transform from unconstrained vectors to lower-triangular matrices with
+        nonnegative diagonal entries.
+
+        This is useful for parameterizing positive definite matrices in terms of
+        their Cholesky factorization.
+        """
+        domain = constraints.real_vector
+        codomain = constraints.lower_cholesky
         bijective = True
         sign = +1
 
+        def __eq__(self, other):
+            return isinstance(other, LowerCholeskyTransform)
+
+        def _call(self, x):
+            r = utils.vec_to_tril_matrix(x)
+            return r.tril(-1) + r.diagonal(dim1=-2, dim2=-1).exp().diag_embed()
+
+        def _inverse(self, y):
+            s = y.tril(-1) + y.diagonal(dim1=-2, dim2=-1).log().diag_embed()
+            return utils.tril_matrix_to_vec(s)
+
         def log_abs_det_jacobian(self, x, y):
-            return x.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+            r = utils.vec_to_tril_matrix(x)
+            return r.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
         
     @biject_to.register(constraints.lower_cholesky)
     def _biject_to_lower_cholesky(constraint):
@@ -34,10 +56,9 @@ try:
 except NotImplementedError:
     class PositiveDefiniteTransform(transforms.Transform):
         """
-        Transform from unconstrained matrices to positive-definite matrices.
+        Transform from unconstrained vectors to positive-definite matrices.
         """
-
-        domain = constraints.independent(constraints.real, 2)
+        domain = constraints.real_vector
         codomain = constraints.positive_definite  # type: ignore[assignment]
         bijective = True
         sign = +1
@@ -54,8 +75,9 @@ except NotImplementedError:
             return LowerCholeskyTransform().inv(y)
 
         def log_abs_det_jacobian(self, x, y):
-            K = x.shape[-1]
-            return K * math.log(2.0) + (torch.arange(K + 1, 1, -1) * x.diagonal(dim1=-2, dim2=-1)).sum(dim=-1)
+            r = utils.vec_to_tril_matrix(x)
+            K = r.shape[-1]
+            return K * math.log(2.0) + (torch.arange(K + 1, 1, -1) * r.diagonal(dim1=-2, dim2=-1)).sum(dim=-1)
         
     @biject_to.register(constraints.positive_definite)
     @biject_to.register(constraints.positive_semidefinite)
