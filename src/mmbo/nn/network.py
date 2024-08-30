@@ -16,7 +16,7 @@ from pyro.contrib.autoname import autoname, scope
 from .linear import bayeslinear, PyroMatrixLinear
 from .activation import bayestanh
 from .normalizer import PyroNormalizer, PyroUnNormalizer
-from ..dist import OrderedNormal, OrderedHalfNormal, MatrixNormal
+from ..dist import OrderedNormal, OrderedHalfNormal, MatrixNormal, ConditionalMultivariateNormal
 
 __all__ = ["TIBNN2", "LayeredTIBNN2"]
 
@@ -172,14 +172,11 @@ class TIBNN2(object):
         mat *= self.prior_variance
         return mat
 
-    def __call__(self, X, y=None):
+    def __call__(self, X, Y=None):
 
         # Normalize data to have mean zero and variance one
         X_normed = self.norm.norm(X)
-        if y is None:
-            y_normed = None
-        else:
-            y_normed = self.unnorm.norm(y)
+        Y_normed = None if Y is None else self.unnorm.norm(Y)
 
         # Plate to reuse throughout
         def data_plate():
@@ -235,8 +232,9 @@ class TIBNN2(object):
         # Output mean and observation
         mu_normed = activation
         with data_plate():
-             mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
-             obs = pyro.sample("obs", dist.MultivariateNormal(mu_normed, precision_matrix = precision), obs=y_normed)
+            mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
+            obs = pyro.sample("obs", dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision), obs=Y_normed)
+            Y_full = pyro.sample("Y_full", ConditionalMultivariateNormal(mu_normed, obs, precision_matrix = precision))
 
         return mu
 

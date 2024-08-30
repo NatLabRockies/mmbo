@@ -198,4 +198,116 @@ class MatrixNormal(TorchDistribution):
 
         return - trace / 2 - normconst - self.U_logdet * self.p / 2 - self.V_logdet * self.n / 2
 
+
+class ConditionalMultivariateNormal(TorchDistribution):
+    """
+    A class representing the conditional multivariate normal distribution
+    of unobserved values conditioned on observed values. It's meant to serve
+    as a kind of counterpart to the NanMaskedMultivariateNormal class.
+
+    Because the observed values in this distribution function kind of like
+    Delta distributions, this distribution should also not be used in MCMC.
+    """
+
+    arg_constraints = {
+        "loc": constraints.real_vector,
+        "condition": constraints.real_vector,
+        "covariance_matrix": constraints.positive_definite,
+        "precision_matrix": constraints.positive_definite,
+        "scale_tril": constraints.lower_cholesky,
+    }
+    support = constraints.real_vector
+    has_rsample = True
+
+    def __init__(self, loc, condition, 
+                 covariance_matrix=None, precision_matrix=None, scale_tril=None, 
+                 validate_args=None):
         
+        # Make sure any batch dimensions of condition get incorporated into the underlying distribution
+        if loc.shape[-1] != condition.shape[-1]:
+            raise ValueError(f"Last dimension of condition ({condition.shape[-1:]}) must match last dimension of loc ({event_shape})")
+
+        self.unconditioned = dist.NanMaskedMultivariateNormal(
+            loc.expand(torch.broadcast_shapes(loc.shape, condition.shape)), 
+            covariance_matrix = covariance_matrix,
+            precision_matrix = precision_matrix,
+            scale_tril = scale_tril,
+            validate_args = validate_args
+        )
+
+        batch_shape = self.unconditioned.batch_shape
+        event_shape = self.unconditioned.event_shape
+
+        # Save the condition values broadcasted to the full distribution shape
+        self.condition = condition.expand(batch_shape + event_shape)
+
+        super().__init__(batch_shape, event_shape, validate_args = validate_args)
+        
+    @property
+    def covariance_matrix(self):
+        return self.unconditioned.covariance_matrix
+    
+    @property
+    def precision_matrix(self):
+        return self.unconditioned.precision_matrix
+    
+    @property
+    def scale_tril(self):
+        return self.unconditioned.scale_tril
+    
+    @property
+    def loc(self):
+        return self.unconditioned.loc
+    
+    def rsample(self, sample_shape = torch.Size()):
+
+        shape = self._extended_shape(sample_shape)
+
+        result = self.condition.new_zeros(shape)
+        is_observed =  self.condition.isfinite()
+        patterns = sorted(set(map(tuple, is_observed.reshape(-1, self.event_dim).tolist())))
+
+        for pattern in patterns:
+            col_obs = torch.tensor(pattern)
+            col_miss = col_obs.logical_not()
+            row_mask = (is_observed == col_obs).all(-1)
+            if all(pattern):
+                # All values observed, just insert the value
+                result[...,row_mask,:] = self.condition[row_mask].expand(sample_shape + (-1,) + self.event_shape)
+            else:
+                if not any(pattern):
+                    # No conditioning, just use full distribution
+                    conditional = dist.MultivariateNormal(self.loc[row_mask], scale_tril = self.scale_tril[row_mask])
+                else:
+                    # Compute conditional distribution
+                    mu1 = self.loc[row_mask][:,col_miss].unsqueeze(-1)
+                    mu2 = self.loc[row_mask][:,col_obs].unsqueeze(-1)
+                    Sigma11 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_miss]
+                    Sigma22 = self.covariance_matrix[row_mask][:,col_obs][:,:,col_obs]
+                    Sigma12 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_obs]
+                    x = self.condition[row_mask][:,col_obs].unsqueeze(-1)
+                    mu = mu1 + Sigma12 @ torch.linalg.solve(Sigma22, x - mu2)
+                    Sigma = Sigma11 - Sigma12 @ torch.linalg.solve(Sigma22, Sigma12.mT)
+                    conditional = dist.MultivariateNormal(mu, Sigma)
+                # Insert random samples into the appropriate places
+                result[...,row_mask,:] = conditional.rsample(sample_shape)
+        
+        return result
+    
+    def log_prob(self, value):
+        if self._validate_args:
+            self._validate_sample(value)
+        # Instances where value does not match conditioned value
+        # Automatically broadcast value and distribution shape.
+        # nonmatch will have result shape
+        is_observed = self.condition.isfinite()
+        nonmatch = torch.logical_and(self.condition != value, is_observed).any(-1)
+        # Calculate conditional density as p(y|x) = p(y,x)/p(x)
+        # Automatically broadcasts in subtraction, result will have
+        # result shape.
+        # Fill in places where conditional values don't match with -inf
+        # Performs some unnecessary computation where nonmatch == True, but
+        # simplifies the code significantly.
+        result = self.unconditioned.log_prob(value) - self.unconditioned.log_prob(self.condition)
+        result[nonmatch] = -torch.inf
+        return result
