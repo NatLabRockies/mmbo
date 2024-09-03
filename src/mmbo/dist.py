@@ -5,29 +5,10 @@ from pyro.distributions import constraints
 from pyro.distributions import transforms
 import functools
 
-__all__ = ["OrderedNormal", "OrderedHalfNormal", "MatrixNormal"]
+from .transforms import softplus_positive_ordered_vector, real_matrix, nanmaskedreal_vector
 
-# Constraints and transforms for the distributions contained in this file
+__all__ = ["OrderedNormal", "OrderedHalfNormal", "MatrixNormal", "ConditionalMultivariateNormal"]
 
-class _SoftPlusPositiveOrderedVector(constraints.Constraint):
-    """
-    Constrains to a positive real-valued tensor where the elements are monotonically
-    increasing along the `event_shape` dimension.
-    """
-    event_dim = 1
-
-    def check(self, value):
-        return constraints.ordered_vector.check(value) & constraints.independent(constraints.softplus_positive, 1).check(value)
-softplus_positive_ordered_vector = _SoftPlusPositiveOrderedVector()
-
-@transforms.biject_to.register(softplus_positive_ordered_vector)
-@transforms.transform_to.register(softplus_positive_ordered_vector)
-def _transform_to_softplus_positive_ordered_vector(constraint):
-    return transforms.ComposeTransform([transforms.OrderedTransform(), transforms.SoftplusTransform()])
-
-real_matrix = constraints.independent(constraints.real, 2)
-
-# Distributions
 
 class OrderedNormal(TorchDistribution):
     """Distrubtion representing the joint distribution of order statistics
@@ -211,12 +192,12 @@ class ConditionalMultivariateNormal(TorchDistribution):
 
     arg_constraints = {
         "loc": constraints.real_vector,
-        "condition": constraints.real_vector,
+        "condition": nanmaskedreal_vector,
         "covariance_matrix": constraints.positive_definite,
         "precision_matrix": constraints.positive_definite,
         "scale_tril": constraints.lower_cholesky,
     }
-    support = constraints.real_vector
+    support = nanmaskedreal_vector
     has_rsample = True
 
     def __init__(self, loc, condition, 
@@ -263,34 +244,33 @@ class ConditionalMultivariateNormal(TorchDistribution):
 
         shape = self._extended_shape(sample_shape)
 
-        result = self.condition.new_zeros(shape)
-        is_observed =  self.condition.isfinite()
-        patterns = sorted(set(map(tuple, is_observed.reshape(-1, self.event_dim).tolist())))
+        result = self.condition.expand(shape).clone() # sample_shape + batch_shape + event_shape
+        is_observed =  self.condition.isfinite() # batch_shape + event_shape
+        patterns = sorted(set(map(tuple, is_observed.reshape(-1, *self.event_shape).tolist()))) 
 
         for pattern in patterns:
-            col_obs = torch.tensor(pattern)
-            col_miss = col_obs.logical_not()
-            row_mask = (is_observed == col_obs).all(-1)
+            col_obs = torch.tensor(pattern) # event_shape
+            col_miss = col_obs.logical_not() # event_shape
+            row_mask = (is_observed == col_obs).all(-1) # batch_shape
             if all(pattern):
-                # All values observed, just insert the value
-                result[...,row_mask,:] = self.condition[row_mask].expand(sample_shape + (-1,) + self.event_shape)
+                continue
+            elif not any(pattern):
+                # No conditioning, just use full distribution
+                conditional = dist.MultivariateNormal(self.loc[row_mask], scale_tril = self.scale_tril[row_mask])
             else:
-                if not any(pattern):
-                    # No conditioning, just use full distribution
-                    conditional = dist.MultivariateNormal(self.loc[row_mask], scale_tril = self.scale_tril[row_mask])
-                else:
-                    # Compute conditional distribution
-                    mu1 = self.loc[row_mask][:,col_miss].unsqueeze(-1)
-                    mu2 = self.loc[row_mask][:,col_obs].unsqueeze(-1)
-                    Sigma11 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_miss]
-                    Sigma22 = self.covariance_matrix[row_mask][:,col_obs][:,:,col_obs]
-                    Sigma12 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_obs]
-                    x = self.condition[row_mask][:,col_obs].unsqueeze(-1)
-                    mu = mu1 + Sigma12 @ torch.linalg.solve(Sigma22, x - mu2)
-                    Sigma = Sigma11 - Sigma12 @ torch.linalg.solve(Sigma22, Sigma12.mT)
-                    conditional = dist.MultivariateNormal(mu, Sigma)
-                # Insert random samples into the appropriate places
-                result[...,row_mask,:] = conditional.rsample(sample_shape)
+                # Compute conditional distribution
+                mu1 = self.loc[row_mask][:,col_miss]
+                mu2 = self.loc[row_mask][:,col_obs]
+                Sigma11 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_miss]
+                Sigma22 = self.covariance_matrix[row_mask][:,col_obs][:,:,col_obs]
+                Sigma12 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_obs]
+                x = self.condition[row_mask][:,col_obs]
+                mu = mu1 + (Sigma12 @ torch.linalg.solve(Sigma22, (x - mu2).unsqueeze(-1))).squeeze(-1)
+                Sigma = Sigma11 - Sigma12 @ torch.linalg.solve(Sigma22, Sigma12.mT)
+                conditional = dist.MultivariateNormal(mu, Sigma)
+            # Insert random samples into the appropriate places
+            write_to = torch.logical_and(row_mask.unsqueeze(-1), col_miss)
+            result[...,write_to]= conditional.rsample(sample_shape).reshape(*sample_shape, -1)
         
         return result
     
