@@ -76,22 +76,35 @@ class TIBNN2Guide(object):
             "V_tril": V_tril
         }
     
-    def missing_posterior_predictive(self, X, y):
+    def missing_posterior_predictive(self, X, Y, j):
         """Posterior predictive parameters for missing observations in a single
         output. The joint posterior predictive distribution of new observations in
         Bayesian linear regression is multivariate T with 'df' degrees of freedom,
         location 'mu', and lower triangular scale 'Sigma_tril'.
         """
+        y = Y[...,j]
+        k = self.model.n_out
         y_present = y.isfinite()
-        y_obs = y[y_present]
+        y_obs = y[y_present].unsqueeze(-1) # Make n-by-1
         X_obs = X[y_present,:]
         X_miss = X[y_present.logical_not(),:]
         n_obs = y_present.sum()
-        raise NotImplementedError
+        n_miss = y_present.logical_not().sum()
+        # Prior parameters
+        a0 = (self.model.nu0 - k + 1) / 2
+        b0 = self.model.V0_inv[j,j] / 2
+        Lambda0_inv = self.model.Lambda0_inv
+        # Posterior parameters
+        Lambda_inv = Lambda0_inv + X_obs.mT @ X_obs
+        mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
+        a = a0 + n_obs / 2
+        b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
+        # Compile into posterior predictive and return
+        Sigma = (b / a) * (torch.eye(n_miss) + X_miss @ torch.linalg.solve(Lambda_inv, X_miss.mT))
         return {
-            "df":None,
-            "mu":None,
-            "Sigma_tril":None
+            "df": 2 * a,
+            "mu": (X_miss @ mu).squeeze(-1),
+            "Sigma_tril": torch.linalg.cholesky(Sigma)
         }
 
     def __call__(self, X, Y):
@@ -143,19 +156,21 @@ class TIBNN2Guide(object):
         ll_X = torch.cat([torch.ones((*activation.shape[:-1], 1)), activation], dim=-1)
 
         # Fill in any missing
-        Y_full = Y_normed
+        Y_full = Y_normed.clone()
         Y_ismissing = Y_full.isfinite().logical_not()
+        col_idx = torch.arange(0, Y_full.shape[-1])
         with scope(prefix = "missing_data"):
             for j in range(Y_full.shape[-1]):
                 if Y_ismissing[...,j].any():
-                    post_pred = self.missing_posterior_predictive(ll_X, Y_full[...,j])
+                    post_pred = self.missing_posterior_predictive(ll_X, Y_full, j)
                     with scope(prefix = f"{j}"):
                         y_new = pyro.sample(
                             "y_new",
                             dist.MultivariateStudentT(post_pred["df"], post_pred["mu"], post_pred["Sigma_tril"]),
                             infer = {'is_auxilliary': True}
                         )
-                    Y_full[...,j][Y_ismissing[...,j]] = y_new
+                    write_to = torch.logical_and(Y_ismissing, col_idx == j)
+                    Y_full[write_to] = y_new
         pyro.sample("Y_full", dist.Delta(Y_full, event_dim=1))
 
         posterior = self.lastlayer_posterior(ll_X, Y_full)
