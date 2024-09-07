@@ -82,6 +82,7 @@ class TIBNN2Guide(object):
         Bayesian linear regression is multivariate T with 'df' degrees of freedom,
         location 'mu', and lower triangular scale 'Sigma_tril'.
         """
+        # Extract/process data
         y = Y[...,j]
         k = self.model.n_out
         y_present = y.isfinite()
@@ -107,14 +108,25 @@ class TIBNN2Guide(object):
             "Sigma_tril": torch.linalg.cholesky(Sigma)
         }
 
-    def __call__(self, X, Y):
+    def __call__(self, X_pred: torch.Tensor = None):
 
-        X_normed = self.model.norm.norm(X)
-        Y_normed = self.model.unnorm.norm(Y)
-        n = X.shape[:-1].numel()
+        do_pred = (X_pred is not None)
+
+        X_normed = self.model.norm.norm(self.model.X_train)
+        Y_normed = self.model.unnorm.norm(self.model.Y_train)
+        if do_pred:
+            X_normed_pred = self.model.norm.norm(X_pred)
+
+        # Plates to use throughout
+        def data_plate():
+            return pyro.plate_stack("data", X_normed.shape[:-1], rightmost_dim=-1)
+        def pred_plate():
+            return pyro.plate_stack("preds", X_normed_pred.shape[:-1], rightmost_dim=-1)
 
         # Construct all but last network layers and pass input through them
         activation = X_normed
+        if do_pred:
+            activation_pred = X_normed_pred
         for layer in range(1, self.model.depth+1):
             insize = activation.shape[-1]
             outsize = self.model.width
@@ -128,11 +140,11 @@ class TIBNN2Guide(object):
                 scale_scale_init = lambda: torch.tensor(1.0)
             else:
                 weight_loc_init = lambda: torch.randn((outsize, insize)) / math.sqrt(insize)
-                weight_scale_init = lambda: torch.ones((outsize, insize)) / (math.sqrt(n * insize))
+                weight_scale_init = lambda: torch.ones((outsize, insize)) / (math.sqrt(self.model.n_train * insize))
                 bias_loc_init = lambda: torch.randn((outsize,))
-                bias_scale_init = lambda: torch.ones((outsize,)) / math.sqrt(n)
+                bias_scale_init = lambda: torch.ones((outsize,)) / math.sqrt(self.model.n_train)
                 scale_loc_init = lambda: dist.Normal(1, 1).sample()
-                scale_scale_init = lambda: torch.tensor(1 / math.sqrt(n))
+                scale_scale_init = lambda: torch.tensor(1 / math.sqrt(self.model.n_train))
             # Set parameter values
             weight_loc = pyro.param(f"layer{layer}/weight_loc", weight_loc_init)
             weight_scale = pyro.param(f"layer{layer}/weight_scale", weight_scale_init, constraint = constraints.positive)
@@ -148,41 +160,47 @@ class TIBNN2Guide(object):
                 #scale = pyro.sample("scale", dist.Delta(scale_loc))
                 scale = pyro.sample("scale", dist.LogNormal(scale_loc, scale_scale))
             activation = tanh(scale * linear(activation, weight, bias))
+            if do_pred:
+                activation_pred = tanh(scale * linear(activation_pred, weight, bias))
 
         # Last layer
         # Output multivariate normal precision matrix
         # Conjugate prior with the previous layer activations serving as X
-        # Append an intercept to the activations
-        ll_X = torch.cat([torch.ones((*activation.shape[:-1], 1)), activation], dim=-1)
 
-        # Fill in any missing
-        Y_full = Y_normed.clone()
-        Y_ismissing = Y_full.isfinite().logical_not()
-        col_idx = torch.arange(0, Y_full.shape[-1])
+        # Append an intercept to the activations, at the training and prediciton sites
+        ll_X = torch.cat([torch.ones((*activation.shape[:-1], 1)), activation], dim=-1)
+        if do_pred:
+            ll_X_pred = torch.cat([torch.ones((*activation_pred.shape[:-1], 1)), activation_pred], dim=-1)
+        else:
+            ll_X_pred = ll_X
+
+        # Fill in any missing data
+        Y_normed_full = Y_normed.clone()
+        Y_ismissing = Y_normed_full.isfinite().logical_not()
+        col_idx = torch.arange(0, Y_normed_full.shape[-1])
         with scope(prefix = "missing_data"):
-            for j in range(Y_full.shape[-1]):
+            for j in range(Y_normed_full.shape[-1]):
                 if Y_ismissing[...,j].any():
-                    post_pred = self.missing_posterior_predictive(ll_X, Y_full, j)
+                    post_pred = self.missing_posterior_predictive(ll_X, Y_normed_full, j)
                     with scope(prefix = f"{j}"):
                         y_new = pyro.sample(
                             "y_new",
                             dist.MultivariateStudentT(post_pred["df"], post_pred["mu"], post_pred["Sigma_tril"]),
-                            infer = {'is_auxilliary': True}
+                            infer = {'is_auxiliary': True}
                         )
                     write_to = torch.logical_and(Y_ismissing, col_idx == j)
-                    Y_full[write_to] = y_new
-        pyro.sample("Y_full", dist.Delta(Y_full, event_dim=1))
+                    Y_normed_full[write_to] = y_new
+        pyro.sample("Y_normed_full", dist.Delta(Y_normed_full, event_dim = Y_normed_full.ndim))
 
-        posterior = self.lastlayer_posterior(ll_X, Y_full)
-
+        # Calculate last layer full conditional parameters and sample last layer sites
+        posterior = self.lastlayer_posterior(ll_X, Y_normed_full)
+        # Precision matrix from full conditional
         precision = pyro.sample(
             "precision", 
             dist.Wishart(posterior["nu"], scale_tril = posterior["V_tril"])
         )
-
-        # Weights and biases with conjugate Matrix Normal prior distribution
+        # Weights and bias full conditional with conjugate Matrix Normal prior distribution
         with scope(prefix = "last"):
-            # Previous layer activations serve as the X.
             full_matrix = pyro.sample(
                 "full_matrix", 
                 MatrixNormal(posterior["B"].mT, 
@@ -190,5 +208,5 @@ class TIBNN2Guide(object):
                              col_scale_tril = posterior["Lambda_tril"])
             )
 
-        # Return the estimated means
-        return self.model.unnorm(ll_X @ full_matrix.mT)
+        # Return the estimated means (at prediction sites if supplied)
+        return self.model.unnorm(ll_X_pred @ full_matrix.mT)

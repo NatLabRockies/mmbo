@@ -20,6 +20,23 @@ from ..dist import OrderedNormal, OrderedHalfNormal, MatrixNormal, ConditionalMu
 
 __all__ = ["TIBNN2", "LayeredTIBNN2"]
 
+def _gen_Lambda0_tril(width, prior_variance):
+        mat = torch.eye(width+1) / math.sqrt(width)
+        mat[1,1] = 1
+        mat /= math.sqrt(prior_variance)
+        return mat
+    
+def _gen_Lambda0(width, prior_variance):
+    mat = torch.eye(width + 1) / width
+    mat[1,1] = 1
+    mat /= prior_variance
+    return mat
+
+def _gen_Lambda0_inv(width, prior_variance):
+    mat = torch.eye(width + 1) * width
+    mat[1,1] = 1
+    mat *= prior_variance
+    return mat
 
 class TIBNN2(object):
     """Truncated Infinite Bayesian Neural Netowork (TIBNN)
@@ -43,9 +60,8 @@ class TIBNN2(object):
         all mean zero variance one, which is much nicer statistically.
     """
 
-    def __init__(self, n_feat, n_out, width, depth = 1, prior_variance = 0.01,
-                 feature_means = None, feature_stds = None,
-                 out_means = None, out_stds = None):
+    def __init__(self, X_train: torch.Tensor, Y_train: torch.Tensor,
+                 width, depth = 1, prior_variance = 0.01):
         
         super().__init__()
 
@@ -55,135 +71,57 @@ class TIBNN2(object):
             raise ValueError("width must be at least one")
 
         # Save the input parameters for easy reference
-        self.n_feat = n_feat
-        self.n_out = n_out
+        self.X_train = X_train
+        self.Y_train = Y_train
+        self.n_feat = X_train.shape[-1]
+        self.n_out = Y_train.shape[-1]
+        self.n_train = X_train.shape[:-1].numel()
         self.width = width
         self.depth = depth
         self.prior_variance = prior_variance
-        if feature_means is None:
-            feature_means = torch.zeros(n_feat)
-        if feature_stds is None:
-            feature_stds = torch.ones(n_feat)
-        if out_means is None:
-            out_means = torch.zeros(n_out)
-        if out_stds is None:
-            out_stds = torch.ones(n_out)
-        self.feature_means = feature_means
-        self.feature_stds = feature_stds
-        self.out_means = out_means
-        self.out_stds = out_stds
+        
+        # Create normalizers
+        self.norm = PyroNormalizer.from_data(self.X_train)
+        self.unnorm = PyroUnNormalizer.from_data(self.Y_train)
 
-        # # First layer: features -> hidden
-        # self.chain = PyroModule[nn.Sequential](
-        #     bayeslinear(n_feat, width, 
-        #                 weight_prior = dist.Normal(0, 1), 
-        #                 bias_prior = dist.Normal(0, 1)),
-        #     bayestanh(dist.LogNormal(1, 1))
-        # )
-        # # Inner layers: hidden -> hidden
-        # for _ in range(depth-1):
-        #     self.chain.append(
-        #         bayeslinear(width, width, 
-        #                     weight_prior = dist.Normal(0, 1 / math.sqrt(width)), 
-        #                     bias_prior = dist.Normal(0, 1))
-        #     )
-        #     self.chain.append(bayestanh(dist.LogNormal(1, 1)))
+        # Create last layer prior hyperparameters
+        # precision ~ Wishart(V0, nu0)
+        # V0_inv = V0^(-1), V0_tril = chol(V0)
+        # full_matrix|precision ~ MatrixNormal(0, precision^(-1), Lambda0)
+        # Lambda0_inv = Lambda0^(-1), Lambda0_tril = chol(Lambda0)
+        self.nu0 = self.n_out + 5
+        self.V0_tril = torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance)
+        self.V0 = torch.eye(self.n_out) / (4 * self.prior_variance)
+        self.V0_inv = torch.eye(self.n_out) * (4 * self.prior_variance)
+        self.Lambda0_tril = _gen_Lambda0_tril(self.width, self.prior_variance)
+        self.Lambda0 = _gen_Lambda0(self.width, self.prior_variance)
+        self.Lambda0_inv = _gen_Lambda0_inv(self.width, self.prior_variance)
 
-        # self.precision = PyroSample(dist.Wishart(df = n_out + 5, scale_tril = torch.eye(n_out) / math.sqrt(4 * prior_variance)))
+    def no_missing(self):
+        """Return a view of the model without the sample site for missing data,
+        for use with HMC/NUTS/MCMC or pyro Autoguides."""
+        return pyro.poutine.block(self, hide=["Y_normed_full"])
 
-        # # Last layer: hidden -> output, conditional on precision matrix
-        # self.lastlayer = PyroMatrixLinear(width, n_out)
-        # colscale = torch.eye(width+1) / math.sqrt(width)
-        # colscale[1,1] = 1
-        # colscale /= math.sqrt(prior_variance)
-        # self.lastlayer.full_matrix = PyroSample(
-        #     lambda self: MatrixNormal(torch.zeros((n_out, width+1)), 
-        #                               row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(self.precision)), 
-        #                               col_scale_tril = colscale)
-        # )
+    def __call__(self, X_pred: torch.Tensor = None):
 
-    @classmethod
-    def from_data(cls, X_norm, Y_norm, *args, **kwargs):
-        """Construct a TIBNN network, automatically creating the pre- and post-
-        normalization layers from the empirical mean and std dev of the provided data."""
-        n_feat = X_norm.shape[1]
-        n_out = Y_norm.shape[1]
-
-        net = cls(n_feat, n_out, *args, **kwargs)
-        norm = PyroNormalizer.from_data(X_norm)
-        unnorm = PyroUnNormalizer.from_data(Y_norm)
-        net.feature_means = norm.means
-        net.feature_stds = norm.stds
-        net.out_means = unnorm.means
-        net.out_stds = unnorm.stds
-
-        return net
-    
-    @cached_property
-    def norm(self):
-        return PyroNormalizer(self.feature_means, self.feature_stds)
-    
-    @cached_property
-    def unnorm(self):
-        return PyroUnNormalizer(self.out_means, self.out_stds)
-    
-    @cached_property
-    def nu0(self):
-        """Prior parameter for the precision matrix.
-        precision ~ Wishart(nu0, V0_tril @ V0_tril.mT)"""
-        return self.n_out + 5
-    
-    @cached_property
-    def V0_tril(self):
-        """Prior parameter for the precision matrix.
-        precision ~ Wishart(nu0, V0_tril @ V0_tril.mT)"""
-        return torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance)
-    
-    @cached_property
-    def V0(self):
-        return torch.eye(self.n_out) / (4 * self.prior_variance)
-    
-    @cached_property 
-    def V0_inv(self):
-        return torch.eye(self.n_out) * (4 * self.prior_variance)
-    
-    @cached_property
-    def Lambda0_tril(self):
-        """Prior parameter for last layer matrix.
-        full_matrix|precision ~ MatrixNormal(0, precision^(-1), Lambda0_tril @ Lambda0_tril.mT)
-        In full_matrix, the first column is the biases, and the remaining matrix is
-        the weights."""
-        colscale_tril = torch.eye(self.width+1) / math.sqrt(self.width)
-        colscale_tril[1,1] = 1
-        colscale_tril /= math.sqrt(self.prior_variance)
-        return colscale_tril
-    
-    @cached_property
-    def Lambda0(self):
-        mat = torch.eye(self.width + 1) / self.width
-        mat[1,1] = 1
-        mat /= self.prior_variance
-        return mat
-    
-    @cached_property
-    def Lambda0_inv(self):
-        mat = torch.eye(self.width + 1) * self.width
-        mat[1,1] = 1
-        mat *= self.prior_variance
-        return mat
-
-    def __call__(self, X, Y=None):
+        do_pred = (X_pred is not None)
 
         # Normalize data to have mean zero and variance one
-        X_normed = self.norm.norm(X)
-        Y_normed = None if Y is None else self.unnorm.norm(Y)
+        X_normed = self.norm.norm(self.X_train)
+        Y_normed = self.unnorm.norm(self.Y_train)
+        if do_pred:
+            X_normed_pred = self.norm.norm(X_pred)
 
-        # Plate to reuse throughout
+        # Plates to reuse throughout
         def data_plate():
-            return pyro.plate_stack("data", X.shape[:-1], rightmost_dim=-1)
+            return pyro.plate_stack("data", X_normed.shape[:-1], rightmost_dim=-1)
+        def pred_plate():
+            return pyro.plate_stack("preds", X_normed_pred.shape[:-1], rightmost_dim=-1)
 
         # Construct network layers and pass input through them
         activation = X_normed
+        if do_pred:
+            activation_pred = X_normed_pred
         for layer in range(1, self.depth+1):
             insize = activation.shape[-1]
             outsize = self.width
@@ -206,6 +144,13 @@ class TIBNN2(object):
                         tanh(scale * linear(activation, weight, bias)),
                         event_dim = 1
                     )
+                if do_pred:
+                    with pred_plate():
+                        activation_pred = pyro.deterministic(
+                            "activation_pred", 
+                            tanh(scale * linear(activation_pred, weight, bias)),
+                            event_dim = 1
+                        )
 
         # Last layer
         # Output multivariate normal precision matrix
@@ -228,15 +173,25 @@ class TIBNN2(object):
             bias = pyro.deterministic("bias", full_matrix[:,0])
             with data_plate():
                 activation = pyro.deterministic("activation", linear(activation, weight, bias), event_dim = 1)
+            if do_pred:
+                with pred_plate():
+                    activation_pred = pyro.deterministic("activation_pred", linear(activation_pred, weight, bias), event_dim = 1)
         
         # Output mean and observation
         mu_normed = activation
+        if do_pred:
+            mu_normed_pred = activation_pred
         with data_plate():
             mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
-            obs = pyro.sample("obs", dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision), obs=Y_normed)
-            Y_full = pyro.sample("Y_full", ConditionalMultivariateNormal(mu_normed, obs, precision_matrix = precision))
-
-        return mu
+            obs_normed = pyro.sample("obs_normed", dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision), obs=Y_normed)
+        if do_pred:
+            with pred_plate():
+                mu_pred = pyro.deterministic("mu_pred", self.unnorm(mu_normed_pred), event_dim = 1)
+        # If Y_normed is None: obs_normed is sampled, Y_normed_full is fully conditioned (Delta distribution)
+        # If Y_normed is not None: obs_normed is a matrix with some nans, as expected for ConditionalMultivariateNormal
+        Y_normed_full = pyro.sample("Y_normed_full", ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision).to_event(mu_normed.ndim - 1))
+        
+        return mu_pred if do_pred else mu
 
 
 class LayeredTIBNN2(PyroModule):
