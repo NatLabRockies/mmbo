@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn.functional import linear, tanh
 
-from pyro.nn import PyroModule, PyroSample
+from pyro.nn import PyroModule
 import pyro.distributions as dist
 import pyro
 import pyro.infer.autoguide as autoguide
@@ -38,7 +38,7 @@ def _gen_Lambda0_inv(width, prior_variance):
     mat *= prior_variance
     return mat
 
-class TIBNN2(object):
+class TIBNN2(PyroModule):
     """Truncated Infinite Bayesian Neural Netowork (TIBNN)
     
     A class approximating an infinite-width Bayesian neural network by using the priors
@@ -58,10 +58,15 @@ class TIBNN2(object):
     out_means, out_stds = used to un-normalize output after coming out of the network. Having these
         norm/unnorm layers in the network lets the Bayesian layers work with observations that are
         all mean zero variance one, which is much nicer statistically.
+    prior_variance = expected residual variance, on the normalized output scale.
+    fixed_scale = If provided, a constant scale value to use inside tanh function. If None, 
+        the scale is considered a parameter and given a reasonable prior distribution.
     """
 
-    def __init__(self, X_train: torch.Tensor, Y_train: torch.Tensor,
-                 width, depth = 1, prior_variance = 0.01):
+    def __init__(self, n_feat, n_out, width, depth = 1, 
+                 feature_means = None, feature_stds = None,
+                 out_means = None, out_stds = None,
+                 prior_variance = 0.01, fixed_scale = None):
         
         super().__init__()
 
@@ -71,44 +76,54 @@ class TIBNN2(object):
             raise ValueError("width must be at least one")
 
         # Save the input parameters for easy reference
-        self.X_train = X_train
-        self.Y_train = Y_train
-        self.n_feat = X_train.shape[-1]
-        self.n_out = Y_train.shape[-1]
-        self.n_train = X_train.shape[:-1].numel()
+        self.n_feat = n_feat
+        self.n_out = n_out
         self.width = width
         self.depth = depth
         self.prior_variance = prior_variance
+        self.fixed_scale = fixed_scale
         
         # Create normalizers
-        self.norm = PyroNormalizer.from_data(self.X_train)
-        self.unnorm = PyroUnNormalizer.from_data(self.Y_train)
+        self.norm = PyroNormalizer(feature_means, feature_stds)
+        self.unnorm = PyroUnNormalizer(out_means, out_stds)
 
-        # Create last layer prior hyperparameters
+        # Create last layer prior hyperparameters, specifying the priors as below
         # precision ~ Wishart(V0, nu0)
         # V0_inv = V0^(-1), V0_tril = chol(V0)
         # full_matrix|precision ~ MatrixNormal(0, precision^(-1), Lambda0)
         # Lambda0_inv = Lambda0^(-1), Lambda0_tril = chol(Lambda0)
-        self.nu0 = self.n_out + 5
-        self.V0_tril = torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance)
-        self.V0 = torch.eye(self.n_out) / (4 * self.prior_variance)
-        self.V0_inv = torch.eye(self.n_out) * (4 * self.prior_variance)
-        self.Lambda0_tril = _gen_Lambda0_tril(self.width, self.prior_variance)
-        self.Lambda0 = _gen_Lambda0(self.width, self.prior_variance)
-        self.Lambda0_inv = _gen_Lambda0_inv(self.width, self.prior_variance)
+        self.register_buffer("nu0", torch.as_tensor(self.n_out + 5))
+        self.register_buffer("V0_tril", torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance))
+        self.register_buffer("V0", torch.eye(self.n_out) / (4 * self.prior_variance))
+        self.register_buffer("V0_inv", torch.eye(self.n_out) * (4 * self.prior_variance))
+        self.register_buffer("Lambda0_tril", _gen_Lambda0_tril(self.width, self.prior_variance))
+        self.register_buffer("Lambda0", _gen_Lambda0(self.width, self.prior_variance))
+        self.register_buffer("Lambda0_inv", _gen_Lambda0_inv(self.width, self.prior_variance))
+
+    @staticmethod
+    def from_data(X_train: torch.Tensor, Y_train: torch.Tensor, *args, **kwargs):
+        """Wrapper around the initializer for this class that determines n_feat, n_out,
+        feature_means, feature_stds, out_means, and out_stds automatically from supplied
+        tensors X_train and Y_train"""
+        n_feat = X_train.shape[-1]
+        n_out = Y_train.shape[-1]
+        model = TIBNN2(n_feat, n_out, *args, **kwargs)
+        model.norm = PyroNormalizer.from_data(X_train)
+        model.unnorm = PyroUnNormalizer.from_data(Y_train)
+        return model
 
     def no_missing(self):
         """Return a view of the model without the sample site for missing data,
         for use with HMC/NUTS/MCMC or pyro Autoguides."""
-        return pyro.poutine.block(self, hide=["Y_normed_full"])
+        return poutine.block(self, hide=["Y_normed_full"])
 
-    def __call__(self, X_pred: torch.Tensor = None):
+    def forward(self, *, X_train: torch.Tensor, Y_train: torch.Tensor, X_pred: torch.Tensor = None):
 
         do_pred = (X_pred is not None)
 
         # Normalize data to have mean zero and variance one
-        X_normed = self.norm.norm(self.X_train)
-        Y_normed = self.unnorm.norm(self.Y_train)
+        X_normed = self.norm.norm(X_train)
+        Y_normed = self.unnorm.norm(Y_train)
         if do_pred:
             X_normed_pred = self.norm.norm(X_pred)
 
@@ -134,10 +149,13 @@ class TIBNN2(object):
                     "bias", 
                     dist.Normal(0, 1).expand((outsize,)).to_event(1)
                 )
-                scale = pyro.sample(
-                    "scale", 
-                    dist.LogNormal(1, 1)
-                )
+                if self.fixed_scale is None:
+                    scale = pyro.sample(
+                        "scale", 
+                        dist.LogNormal(1, 1)
+                    )
+                else:
+                    scale = self.fixed_scale
                 with data_plate():
                     activation = pyro.deterministic(
                         "activation", 

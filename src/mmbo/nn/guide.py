@@ -39,16 +39,22 @@ def _woodbury_inv(A_inv, X, C_inv = None):
     return A_inv - A_inv @ X.mT @ smaller_inv @ X @ A_inv
 
 
-class TIBNN2Guide(object):
+class TIBNN2Guide(PyroModule):
     """A custom guide for TIBNN models that captures the kinds of posterior dependence
     that matters for the model's predictive abilities."""
 
     def __init__(self, model: TIBNN2, init_style = "prior"):
-        self.model = model
+        super().__init__()
+
+        self._model = (model,) # Do not register model as submodule
         if init_style in ["prior","random"]:
             self.init_style = init_style
         else:
             raise ValueError(f"Invalid value '{init_style}' for init_style")
+
+    @property
+    def model(self):
+        return self._model[0]
 
     def lastlayer_posterior(self, X, Y):
         """Posterior parameter of precision matrix and weight/bias matrix.
@@ -108,12 +114,13 @@ class TIBNN2Guide(object):
             "Sigma_tril": torch.linalg.cholesky(Sigma)
         }
 
-    def __call__(self, X_pred: torch.Tensor = None):
+    def forward(self, *, X_train: torch.Tensor, Y_train: torch.Tensor, X_pred: torch.Tensor = None):
 
         do_pred = (X_pred is not None)
 
-        X_normed = self.model.norm.norm(self.model.X_train)
-        Y_normed = self.model.unnorm.norm(self.model.Y_train)
+        # Normalize data with model's normalizers
+        X_normed = self.model.norm.norm(X_train)
+        Y_normed = self.model.unnorm.norm(Y_train)
         if do_pred:
             X_normed_pred = self.model.norm.norm(X_pred)
 
@@ -127,7 +134,7 @@ class TIBNN2Guide(object):
         activation = X_normed
         if do_pred:
             activation_pred = X_normed_pred
-        for layer in range(1, self.model.depth+1):
+        for layer in range(1, self.model.depth + 1):
             insize = activation.shape[-1]
             outsize = self.model.width
             # Find initial values for parameters
@@ -136,29 +143,35 @@ class TIBNN2Guide(object):
                 weight_scale_init = lambda: torch.ones((outsize, insize)) / math.sqrt(insize)
                 bias_loc_init = lambda: torch.zeros((outsize,))
                 bias_scale_init = lambda: torch.ones((outsize,))
-                scale_loc_init = lambda: torch.tensor(1.0)
-                scale_scale_init = lambda: torch.tensor(1.0)
+                if self.model.fixed_scale is None:
+                    scale_loc_init = lambda: torch.tensor(1.0)
+                    scale_scale_init = lambda: torch.tensor(1.0)
             else:
                 weight_loc_init = lambda: torch.randn((outsize, insize)) / math.sqrt(insize)
-                weight_scale_init = lambda: torch.ones((outsize, insize)) / (math.sqrt(self.model.n_train * insize))
+                weight_scale_init = lambda: torch.ones((outsize, insize)) / (math.sqrt(insize))
                 bias_loc_init = lambda: torch.randn((outsize,))
-                bias_scale_init = lambda: torch.ones((outsize,)) / math.sqrt(self.model.n_train)
-                scale_loc_init = lambda: dist.Normal(1, 1).sample()
-                scale_scale_init = lambda: torch.tensor(1 / math.sqrt(self.model.n_train))
+                bias_scale_init = lambda: torch.ones((outsize,))
+                if self.model.fixed_scale is None:
+                    scale_loc_init = lambda: dist.Normal(1, 0.1).sample()
+                    scale_scale_init = lambda: torch.tensor(1.0)
             # Set parameter values
             weight_loc = pyro.param(f"layer{layer}/weight_loc", weight_loc_init)
             weight_scale = pyro.param(f"layer{layer}/weight_scale", weight_scale_init, constraint = constraints.positive)
             bias_loc = pyro.param(f"layer{layer}/bias_loc", bias_loc_init)
             bias_scale = pyro.param(f"layer{layer}/bias_scale", bias_scale_init, constraint = constraints.positive)
-            scale_loc = pyro.param(f"layer{layer}/scale_loc", scale_loc_init)
-            scale_scale = pyro.param(f"layer{layer}/scale_scale", scale_scale_init, constraint = constraints.positive)
+            if self.model.fixed_scale is None:
+                scale_loc = pyro.param(f"layer{layer}/scale_loc", scale_loc_init)
+                scale_scale = pyro.param(f"layer{layer}/scale_scale", scale_scale_init, constraint = constraints.positive)
             with scope(prefix = f"layer{layer}"):
                 #weight = pyro.sample("weight", dist.Delta(weight_loc, event_dim=2))
                 weight = pyro.sample("weight", dist.Normal(weight_loc, weight_scale).to_event(2))
                 #bias = pyro.sample("bias", dist.Delta(bias_loc, event_dim=1))
                 bias = pyro.sample("bias", dist.Normal(bias_loc, bias_scale).to_event(1))
                 #scale = pyro.sample("scale", dist.Delta(scale_loc))
-                scale = pyro.sample("scale", dist.LogNormal(scale_loc, scale_scale))
+                if self.model.fixed_scale is None:
+                    scale = pyro.sample("scale", dist.LogNormal(scale_loc, scale_scale))
+                else:
+                    scale = self.model.fixed_scale
             activation = tanh(scale * linear(activation, weight, bias))
             if do_pred:
                 activation_pred = tanh(scale * linear(activation_pred, weight, bias))
