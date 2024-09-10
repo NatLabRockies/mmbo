@@ -137,7 +137,7 @@ class TIBNN2(PyroModule):
         activation = X_normed
         if do_pred:
             activation_pred = X_normed_pred
-        for layer in range(1, self.depth+1):
+        for layer in range(self.depth):
             insize = activation.shape[-1]
             outsize = self.width
             with scope(prefix = f"layer{layer}"):
