@@ -101,6 +101,11 @@ class TIBNN2Guide(PyroModule):
         This function does all of the expensive matrix calculations as few times
         as possible.
         """
+        # Reshape the inputs to be 2-d tensors, making matrix multipliations
+        # later work appropriately
+        X = X.reshape((-1, X.shape[-1]))
+        Y = Y.reshape((-1, Y.shape[-1]))
+        
         nu = self.model.nu0 + X.shape[:-1].numel()
         Lambda_inv = self.model.Lambda0_inv + X.mT @ X
         #Lambda = torch.linalg.inv(Lambda_inv)
