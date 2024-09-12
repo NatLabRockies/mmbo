@@ -291,5 +291,5 @@ class LayeredTIBNN2(PyroModule):
         else:
             main_X_pred = None
         with scope(prefix = "main"):
-            last_mu = self.main(X_train = main_X_train, Y_train = Y2_train, X_pred = main_X_pred)
-        return last_mu
+            main_mu = self.main(X_train = main_X_train, Y_train = Y2_train, X_pred = main_X_pred)
+        return main_mu

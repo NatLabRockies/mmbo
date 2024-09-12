@@ -10,11 +10,11 @@ from torch import nn
 from torch.nn.functional import linear, tanh
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
-from .network import TIBNN2
+from .network import TIBNN2, LayeredTIBNN2
 from ..dist import MatrixNormal
 from .activation import LearnTanh
 
-__all__ = ["TIBNN2Guide"]
+__all__ = ["TIBNN2Guide", "LayeredTIBNN2Guide"]
 
 
 def _woodbury_inv(A_inv, X, C_inv = None):
@@ -105,7 +105,7 @@ class TIBNN2Guide(PyroModule):
         # later work appropriately
         X = X.reshape((-1, X.shape[-1]))
         Y = Y.reshape((-1, Y.shape[-1]))
-        
+
         nu = self.model.nu0 + X.shape[:-1].numel()
         Lambda_inv = self.model.Lambda0_inv + X.mT @ X
         #Lambda = torch.linalg.inv(Lambda_inv)
@@ -238,3 +238,43 @@ class TIBNN2Guide(PyroModule):
 
         # Return the estimated means (at prediction sites if supplied)
         return self.model.unnorm(ll_X_pred @ full_matrix.mT)
+
+
+def _tensor_pack(tensors):
+    return torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0)
+
+def _tensor_unpack(tensor, shapes):
+    assert tensor.ndim == 2
+    splits = torch.split(tensor, [s[:-1].numel() for s in shapes])
+    return tuple(t.reshape(s) for t,s in zip(splits, shapes))
+
+
+class LayeredTIBNN2Guide(PyroModule):
+
+    def __init__(self, model: LayeredTIBNN2, init_style = "prior"):
+        self.aux = TIBNN2Guide(model.aux, init_style)
+        self.main = TIBNN2Guide(model.main, init_style)
+
+    def forward(self, X1_train:torch.Tensor, X2_train:torch.Tensor, Y1_train:torch.Tensor, Y2_train:torch.Tensor, X_pred:torch.Tensor = None):
+
+        do_pred = (X_pred is not None)
+
+        if do_pred:
+            aux_X_pred = _tensor_pack([X2_train, X_pred])
+        else:
+            aux_X_pred = X2_train
+        with scope(prefix = "aux"):
+            aux_mu = self.aux(X_train = X1_train, Y_train = Y1_train, X_pred = aux_X_pred)
+        if do_pred:
+            main_feed_train, main_feed_pred = _tensor_unpack(aux_mu, [X2_train.shape, X_pred.shape])
+        else:
+            main_feed_train = aux_mu
+        
+        main_X_train = torch.cat((X2_train, main_feed_train), dim=-1)
+        if do_pred:
+            main_X_pred = torch.cat((X_pred, main_feed_pred), dim=-1)
+        else:
+            main_X_pred = None
+        with scope(prefix = "main"):
+            main_mu = self.main(X_train = main_X_train, Y_train = Y2_train, X_pred = main_X_pred)
+        return main_mu
