@@ -38,6 +38,7 @@ def _gen_Lambda0_inv(width, prior_variance):
     mat *= prior_variance
     return mat
 
+
 class TIBNN2(PyroModule):
     """Truncated Infinite Bayesian Neural Netowork (TIBNN)
     
@@ -212,6 +213,15 @@ class TIBNN2(PyroModule):
         return mu_pred if do_pred else mu
 
 
+def _tensor_pack(tensors):
+    return torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0)
+
+def _tensor_unpack(tensor, shapes):
+    assert tensor.ndim == 2
+    splits = torch.split(tensor, [s[:-1].numel() for s in shapes])
+    return tuple(t.reshape(s) for t,s in zip(splits, shapes))
+
+
 class LayeredTIBNN2(PyroModule):
     """An architecture of two TIBNN networks, layered such that the output of one
     is concatenated to the features and passed as input to the second."""
@@ -223,7 +233,7 @@ class LayeredTIBNN2(PyroModule):
         
         super().__init__()
 
-        self.first = TIBNN2(n_feat, n_out1, *args, 
+        self.aux = TIBNN2(n_feat, n_out1, *args, 
                            feature_means = feature_means, feature_stds = feature_stds,
                            out_means = out1_means, out_stds = out1_stds, **kwargs)
         if feature_means is None or out1_means is None:
@@ -234,34 +244,52 @@ class LayeredTIBNN2(PyroModule):
             feature2_stds = None
         else:
             feature2_stds = torch.cat((feature_stds, out1_stds), dim = -1)
-        self.second = TIBNN2(n_feat + n_out1, n_out2, *args,
+        self.main = TIBNN2(n_feat + n_out1, n_out2, *args,
                             feature_means = feature2_means, feature_stds = feature2_stds,
                             out_means = out2_means, out_stds = out2_stds, **kwargs)
 
-    @classmethod
-    def from_data(cls, X_norm, Y1_norm, Y2_norm, *args, **kwargs):
+    @staticmethod
+    def from_data(X1_norm, X2_norm, Y1_norm, Y2_norm, *args, **kwargs):
         """Construct a LayeredTIBNN network, automatically creating the pre- and post-
         normalization layers from the empirical mean and std dev of the provided data."""
+        X_norm = _tensor_pack([X1_norm, X2_norm])
         n_feat = X_norm.shape[1]
         n_out1 = Y1_norm.shape[1]
         n_out2 = Y2_norm.shape[1]
 
-        net = cls(n_feat, n_out1, n_out2, *args, **kwargs)
+        net = LayeredTIBNN2(n_feat, n_out1, n_out2, *args, **kwargs)
 
-        net.first.norm = PyroNormalizer.from_data(X_norm)
-        net.first.unnorm = PyroUnNormalizer.from_data(Y1_norm)
+        net.aux.norm = PyroNormalizer.from_data(X_norm)
+        net.aux.unnorm = PyroUnNormalizer.from_data(Y1_norm)
 
-        net.second.norm = PyroNormalizer.from_data(
-            torch.cat((X_norm, Y1_norm), dim=-1)
+        net.main.norm = PyroNormalizer(
+            torch.cat([net.aux.norm.means, net.aux.unnorm.means]),
+            torch.cat([net.aux.norm.stds, net.aux.unnorm.stds])
         )
-        net.second.unnorm = PyroUnNormalizer.from_data(Y2_norm)
+        net.main.unnorm = PyroUnNormalizer.from_data(Y2_norm)
 
         return net
     
-    def forward(self, X, y1=None, y2=None):
-        with scope(prefix = "first"):
-            first_mu = self.first(X, y1)
-        last_input = torch.cat((X, first_mu), dim=-1)
-        with scope(prefix = "second"):
-            last_mu = self.second(last_input, y2)
+    def forward(self, *, X1_train:torch.Tensor, X2_train:torch.Tensor, Y1_train:torch.Tensor, Y2_train:torch.Tensor, X_pred:torch.Tensor = None):
+
+        do_pred = (X_pred is not None)
+
+        if do_pred:
+            aux_X_pred = _tensor_pack([X2_train, X_pred])
+        else:
+            aux_X_pred = X2_train
+        with scope(prefix = "aux"):
+            aux_mu = self.aux(X_train = X1_train, Y_train = Y1_train, X_pred = aux_X_pred)
+        if do_pred:
+            main_feed_train, main_feed_pred = _tensor_unpack(aux_mu, [X2_train.shape, X_pred.shape])
+        else:
+            main_feed_train = aux_mu
+        
+        main_X_train = torch.cat((X2_train, main_feed_train), dim=-1)
+        if do_pred:
+            main_X_pred = torch.cat((X_pred, main_feed_pred), dim=-1)
+        else:
+            main_X_pred = None
+        with scope(prefix = "main"):
+            last_mu = self.main(X_train = main_X_train, Y_train = Y2_train, X_pred = main_X_pred)
         return last_mu
