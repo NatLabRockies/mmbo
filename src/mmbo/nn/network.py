@@ -270,6 +270,9 @@ class LayeredTIBNN2(PyroModule):
 
         return net
     
+    def no_missing(self):
+        return poutine.block(self, hide=["aux/Y_normed_full", "main/Y_normed_full"])
+
     def forward(self, *, X1_train:torch.Tensor, X2_train:torch.Tensor, Y1_train:torch.Tensor, Y2_train:torch.Tensor, X_pred:torch.Tensor = None):
 
         do_pred = (X_pred is not None)
