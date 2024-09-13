@@ -38,34 +38,89 @@ def _woodbury_inv(A_inv, X, C_inv = None):
         smaller_inv = torch.linalg.inv(C_inv + X @ A_inv @ X.mT)
     return A_inv - A_inv @ X.mT @ smaller_inv @ X @ A_inv
 
-def _layer_params(insize, outsize, init_style, include_scale):
-    """Create a PyroModule containing PyroParams for a dense layer."""
-    if init_style == "prior":
-        weight_loc_init = lambda: torch.zeros((outsize, insize))
-        weight_scale_init = lambda: torch.ones((outsize, insize)) / math.sqrt(insize)
-        bias_loc_init = lambda: torch.zeros((outsize,))
-        bias_scale_init = lambda: torch.ones((outsize,))
-        if include_scale:
-            scale_loc_init = lambda: torch.tensor(1.0)
-            scale_scale_init = lambda: torch.tensor(1.0)
-    else:
-        weight_loc_init = lambda: torch.randn((outsize, insize)) / math.sqrt(insize)
-        weight_scale_init = lambda: torch.ones((outsize, insize)) / (math.sqrt(insize))
-        bias_loc_init = lambda: torch.randn((outsize,))
-        bias_scale_init = lambda: torch.ones((outsize,))
-        if include_scale:
-            scale_loc_init = lambda: dist.Normal(1, 0.1).sample()
-            scale_scale_init = lambda: torch.tensor(1.0)
-    # Set parameter values
-    pars = PyroModule()
-    pars.weight_loc = PyroParam(weight_loc_init)
-    pars.weight_scale = PyroParam(weight_scale_init, constraint = constraints.positive)
-    pars.bias_loc = PyroParam(bias_loc_init)
-    pars.bias_scale = PyroParam(bias_scale_init, constraint = constraints.positive)
-    if include_scale:
-        pars.scale_loc = PyroParam(scale_loc_init)
-        pars.scale_scale = PyroParam(scale_scale_init, constraint = constraints.positive)
-    return pars
+class _IndependentLinearGuide(PyroModule):
+    """A PyroModule that contains parameters for a dense linear layer, and samples
+    weights and biases from independent Gaussian distributions. For use in a guide."""
+
+    def __init__(self, insize, outsize, init_style, fixed_scale = None):
+        super().__init__()
+        # Initial parameter values based on init_style
+        weight_scale_init = torch.ones((outsize, insize)) / math.sqrt(insize)
+        bias_scale_init = torch.ones((outsize,))
+        if fixed_scale is None:
+                scale_scale_init = torch.tensor(1.0)
+        if init_style == "prior":
+            weight_loc_init = torch.zeros((outsize, insize))
+            bias_loc_init = torch.zeros((outsize,))
+            if fixed_scale is None:
+                scale_loc_init = torch.tensor(1.0)
+        else:
+            weight_loc_init = torch.randn((outsize, insize)) / math.sqrt(insize)
+            bias_loc_init = torch.randn((outsize,))
+            if fixed_scale is None:
+                scale_loc_init = dist.Normal(1, 0.1).sample()
+        # Create parameters
+        self.weight_loc = PyroParam(weight_loc_init)
+        self.weight_scale = PyroParam(weight_scale_init, constraint = constraints.positive)
+        self.bias_loc = PyroParam(bias_loc_init)
+        self.bias_scale = PyroParam(bias_scale_init, constraint = constraints.positive)
+        self.fixed_scale = fixed_scale
+        if fixed_scale is None:
+            self.scale_loc = PyroParam(scale_loc_init)
+            self.scale_scale = PyroParam(scale_scale_init, constraint = constraints.positive)
+    
+    def forward(self):
+        weight = pyro.sample("weight", dist.Normal(self.weight_loc, self.weight_scale).to_event(2))
+        bias = pyro.sample("bias", dist.Normal(self.bias_loc, self.bias_scale).to_event(1))
+        if self.fixed_scale is None:
+            scale = pyro.sample("scale", dist.LogNormal(self.scale_loc, self.scale_scale))
+        else:
+            scale = self.fixed_scale
+        return weight,bias,scale
+
+
+class _MatrixNormalLinearGuide(PyroModule):
+    """A PyroModule that contains parameters for a dense linear layer, and samples
+    weights and biases together from a MatrixNormal distribution. For use in a guide."""
+
+    def __init__(self, insize, outsize, init_style, fixed_scale = None):
+        super().__init__()
+        # Initial parameter values based on init_style
+        full_rowscale_init = torch.eye(outsize)
+        full_colscale_init = torch.eye(insize + 1) / math.sqrt(insize)
+        full_colscale_init[0,0] = 1.0
+        if fixed_scale is None:
+            scale_scale_init = torch.tensor(1.0)
+        if init_style == "prior":
+            full_loc_init = torch.zeros((outsize, insize + 1))
+            if fixed_scale is None:
+                scale_loc_init = torch.tensor(1.0)
+        else:
+            full_loc_init = torch.randn((outsize, insize + 1)) / math.sqrt(insize)
+            if fixed_scale is None:
+                scale_loc_init = dist.Normal(1, 0.1).sample()
+        # Create parameters
+        self.full_loc = PyroParam(full_loc_init)
+        self.full_rowscale = PyroParam(full_rowscale_init, constraint = constraints.lower_cholesky)
+        self.full_colscale = PyroParam(full_colscale_init, constraint = constraints.lower_cholesky)
+        self.fixed_scale = fixed_scale
+        if fixed_scale is None:
+            self.scale_loc = PyroParam(scale_loc_init)
+            self.scale_scale = PyroParam(scale_scale_init, constraint = constraints.positive)
+    
+    def forward(self):
+        full_matrix = pyro.sample(
+            "full_matrix", 
+            MatrixNormal(self.full_loc, self.full_rowscale, self.full_colscale),
+            infer = {"is_auxiliary": True}
+        )
+        weight = pyro.sample("weight", dist.Delta(full_matrix[:,1:], event_dim=2))
+        bias = pyro.sample("bias", dist.Delta(full_matrix[:,0], event_dim=1))
+        if self.fixed_scale is None:
+            scale = pyro.sample("scale", dist.LogNormal(self.scale_loc, self.scale_scale))
+        else:
+            scale = self.fixed_scale
+        return weight,bias,scale
 
 
 class TIBNN2Guide(PyroModule):
@@ -82,11 +137,12 @@ class TIBNN2Guide(PyroModule):
             raise ValueError(f"Invalid value '{init_style}' for init_style")
         
         # Parameters
-        self.layer_params = PyroModuleList([])
+        self.layers = PyroModuleList([])
         insize = model.n_feat
         outsize = model.width
         for _ in range(model.depth):
-            self.layer_params.append(_layer_params(insize, outsize, init_style, model.fixed_scale is None))
+            #self.layers.append(_IndependentLinearGuide(insize, outsize, init_style, model.fixed_scale))
+            self.layers.append(_MatrixNormalLinearGuide(insize, outsize, init_style, model.fixed_scale))
             insize = model.width
 
     @property
@@ -178,15 +234,7 @@ class TIBNN2Guide(PyroModule):
             activation_pred = X_normed_pred
         for layer in range(self.model.depth):
             with scope(prefix = f"layer{layer}"):
-                #weight = pyro.sample("weight", dist.Delta(weight_loc, event_dim=2))
-                weight = pyro.sample("weight", dist.Normal(self.layer_params[layer].weight_loc, self.layer_params[layer].weight_scale).to_event(2))
-                #bias = pyro.sample("bias", dist.Delta(bias_loc, event_dim=1))
-                bias = pyro.sample("bias", dist.Normal(self.layer_params[layer].bias_loc, self.layer_params[layer].bias_scale).to_event(1))
-                #scale = pyro.sample("scale", dist.Delta(scale_loc))
-                if self.model.fixed_scale is None:
-                    scale = pyro.sample("scale", dist.LogNormal(self.layer_params[layer].scale_loc, self.layer_params[layer].scale_scale))
-                else:
-                    scale = self.model.fixed_scale
+                weight, bias, scale = self.layers[layer]()
             activation = tanh(scale * linear(activation, weight, bias))
             if do_pred:
                 activation_pred = tanh(scale * linear(activation_pred, weight, bias))
