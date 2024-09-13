@@ -141,27 +141,11 @@ class MatrixNormal(TorchDistribution):
     def p(self):
         return self.event_shape[1]
 
-    @functools.cached_property
-    def V(self):
-        return self.col_scale_tril @ self.col_scale_tril.mT
-
-    @functools.cached_property
-    def U(self):
-        return self.row_scale_tril @ self.row_scale_tril.mT
-
-    @functools.cached_property
-    def V_inv(self):
-        return torch.cholesky_inverse(self.col_scale_tril)
-
-    @functools.cached_property
-    def U_inv(self):
-        return torch.cholesky_inverse(self.row_scale_tril)
-
-    @functools.cached_property
+    @property
     def V_logdet(self):
         return 2 * self.col_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
     
-    @functools.cached_property
+    @property
     def U_logdet(self):
         return 2 * self.row_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
 
@@ -175,7 +159,17 @@ class MatrixNormal(TorchDistribution):
             self._validate_sample(value)
 
         normconst = torch.log(torch.tensor(2 * torch.pi)) * self.n * self.p / 2
-        trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+        halftrace = torch.linalg.solve_triangular(
+            self.col_scale_tril.mT, 
+            torch.linalg.solve_triangular(self.row_scale_tril, value - self.loc, upper=False), 
+            upper=True, left=False
+        )
+        if self.n > self.p:
+            trace = (halftrace.mT @ halftrace).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+        else:
+            trace = (halftrace @ halftrace.mT).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+        # Old calculation
+        #trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
 
         return - trace / 2 - normconst - self.U_logdet * self.p / 2 - self.V_logdet * self.n / 2
 
