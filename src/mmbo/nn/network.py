@@ -12,6 +12,7 @@ import pyro
 import pyro.infer.autoguide as autoguide
 import pyro.poutine as poutine
 from pyro.contrib.autoname import autoname, scope
+from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
 from .linear import bayeslinear, PyroMatrixLinear
 from .activation import bayestanh
@@ -84,6 +85,10 @@ class TIBNN2(PyroModule):
         self.prior_variance = prior_variance
         self.fixed_scale = fixed_scale
         
+        # Training data, if supplied
+        self.register_buffer("X_train", None)
+        self.register_buffer("Y_train", None)
+
         # Create normalizers
         self.norm = PyroNormalizer(feature_means, feature_stds)
         self.unnorm = PyroUnNormalizer(out_means, out_stds)
@@ -111,6 +116,8 @@ class TIBNN2(PyroModule):
         model = TIBNN2(n_feat, n_out, *args, **kwargs)
         model.norm = PyroNormalizer.from_data(X_train)
         model.unnorm = PyroUnNormalizer.from_data(Y_train)
+        model.X_train = X_train
+        model.Y_train = Y_train
         return model
 
     def no_missing(self):
@@ -118,7 +125,17 @@ class TIBNN2(PyroModule):
         for use with HMC/NUTS/MCMC or pyro Autoguides."""
         return poutine.block(self, hide=["Y_normed_full"])
 
-    def forward(self, *, X_train: torch.Tensor, Y_train: torch.Tensor, X_pred: torch.Tensor = None):
+    def forward(self, *, 
+                X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
+                X_pred: torch.Tensor = None):
+
+        # Fill in training data
+        X_train = X_train if X_train is not None else self.X_train
+        if X_train is None:
+            raise ValueError("Must supply X_train")
+        Y_train = Y_train if Y_train is not None else self.Y_train
+        if Y_train is None:
+            raise ValueError("Must supply Y_train")
 
         do_pred = (X_pred is not None)
 
@@ -185,7 +202,7 @@ class TIBNN2(PyroModule):
             full_matrix = pyro.sample(
                 "full_matrix", 
                 MatrixNormal(torch.zeros((self.n_out, self.width+1)), 
-                             row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(precision)), 
+                             row_scale_tril = _precision_to_scale_tril(precision), 
                              col_scale_tril = self.Lambda0_tril)
             )
             weight = pyro.deterministic("weight", full_matrix[:,1:])
@@ -208,18 +225,26 @@ class TIBNN2(PyroModule):
                 mu_pred = pyro.deterministic("mu_pred", self.unnorm(mu_normed_pred), event_dim = 1)
         # If Y_normed is None: obs_normed is sampled, Y_normed_full is fully conditioned (Delta distribution)
         # If Y_normed is not None: obs_normed is a matrix with some nans, as expected for ConditionalMultivariateNormal
-        Y_normed_full = pyro.sample("Y_normed_full", ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision).to_event(mu_normed.ndim - 1))
+        pyro.sample("Y_normed_full", ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision).to_event(mu_normed.ndim - 1))
         
         return mu_pred if do_pred else mu
 
 
-def _tensor_pack(tensors):
+def _vector_pack(tensors):
+    """Packs an iterable of tensors, each representing a batch of vectors of
+    equal dimension, into one 2d tensor with the same length last dimension."""
     return torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0)
 
-def _tensor_unpack(tensor, shapes):
+def _vector_unpack(tensor, batch_shapes):
+    """Undoes the operation of _vector_pack, by unpacking the first dimension
+    of the 2d input tensor into one tensor per element in the iterable
+    batch_shapes. Each resulting tensor will have leading dimensions according
+    to the values in batch_shapes, and final dimension equal to the last dimension
+    of the input tensor."""
     assert tensor.ndim == 2
-    splits = torch.split(tensor, [s[:-1].numel() for s in shapes])
-    return tuple(t.reshape(s) for t,s in zip(splits, shapes))
+    vecdim = tensor.shape[-1]
+    splits = torch.split(tensor, [s.numel() for s in batch_shapes], dim=0)
+    return tuple(t.reshape(*s, vecdim) for t,s in zip(splits, batch_shapes))
 
 
 class LayeredTIBNN2(PyroModule):
@@ -247,44 +272,71 @@ class LayeredTIBNN2(PyroModule):
         self.main = TIBNN2(n_feat + n_out1, n_out2, *args,
                             feature_means = feature2_means, feature_stds = feature2_stds,
                             out_means = out2_means, out_stds = out2_stds, **kwargs)
+        
+        # Training data, if supplied
+        self.register_buffer("X1_train", None)
+        self.register_buffer("X2_train", None)
+        self.register_buffer("Y1_train", None)
+        self.register_buffer("Y2_train", None)
 
     @staticmethod
-    def from_data(X1_norm, X2_norm, Y1_norm, Y2_norm, *args, **kwargs):
+    def from_data(X1_train: torch.Tensor, X2_train: torch.Tensor, Y1_train: torch.Tensor, Y2_train: torch.Tensor, *args, **kwargs):
         """Construct a LayeredTIBNN network, automatically creating the pre- and post-
         normalization layers from the empirical mean and std dev of the provided data."""
-        X_norm = _tensor_pack([X1_norm, X2_norm])
+        X_norm = _vector_pack([X1_train, X2_train])
         n_feat = X_norm.shape[1]
-        n_out1 = Y1_norm.shape[1]
-        n_out2 = Y2_norm.shape[1]
+        n_out1 = Y1_train.shape[1]
+        n_out2 = Y2_train.shape[1]
 
         net = LayeredTIBNN2(n_feat, n_out1, n_out2, *args, **kwargs)
 
         net.aux.norm = PyroNormalizer.from_data(X_norm)
-        net.aux.unnorm = PyroUnNormalizer.from_data(Y1_norm)
+        net.aux.unnorm = PyroUnNormalizer.from_data(Y1_train)
 
         net.main.norm = PyroNormalizer(
             torch.cat([net.aux.norm.means, net.aux.unnorm.means]),
             torch.cat([net.aux.norm.stds, net.aux.unnorm.stds])
         )
-        net.main.unnorm = PyroUnNormalizer.from_data(Y2_norm)
+        net.main.unnorm = PyroUnNormalizer.from_data(Y2_train)
+
+        net.X1_train = X1_train
+        net.X2_train = X2_train
+        net.Y1_train = Y1_train
+        net.Y2_train = Y2_train
 
         return net
     
     def no_missing(self):
         return poutine.block(self, hide=["aux/Y_normed_full", "main/Y_normed_full"])
 
-    def forward(self, *, X1_train:torch.Tensor, X2_train:torch.Tensor, Y1_train:torch.Tensor, Y2_train:torch.Tensor, X_pred:torch.Tensor = None):
+    def forward(self, *, 
+                X1_train:torch.Tensor = None, X2_train:torch.Tensor = None, 
+                Y1_train:torch.Tensor = None, Y2_train:torch.Tensor = None, 
+                X_pred:torch.Tensor = None):
+        # Fill in training data
+        X1_train = X1_train if X1_train is not None else self.X1_train
+        if X1_train is None:
+            raise ValueError("Must supply X1_train")
+        X2_train = X2_train if X2_train is not None else self.X2_train
+        if X2_train is None:
+            raise ValueError("Must supply X2_train")
+        Y1_train = Y1_train if Y1_train is not None else self.Y1_train
+        if Y1_train is None:
+            raise ValueError("Must supply Y1_train")
+        Y2_train = Y2_train if Y2_train is not None else self.Y2_train
+        if Y2_train is None:
+            raise ValueError("Must supply Y2_train")
 
         do_pred = (X_pred is not None)
 
         if do_pred:
-            aux_X_pred = _tensor_pack([X2_train, X_pred])
+            aux_X_pred = _vector_pack([X2_train, X_pred])
         else:
             aux_X_pred = X2_train
         with scope(prefix = "aux"):
             aux_mu = self.aux(X_train = X1_train, Y_train = Y1_train, X_pred = aux_X_pred)
         if do_pred:
-            main_feed_train, main_feed_pred = _tensor_unpack(aux_mu, [X2_train.shape, X_pred.shape])
+            main_feed_train, main_feed_pred = _vector_unpack(aux_mu, [X2_train.shape[:-1], X_pred.shape[:-1]])
         else:
             main_feed_train = aux_mu
         

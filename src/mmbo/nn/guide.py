@@ -10,7 +10,7 @@ from torch import nn
 from torch.nn.functional import linear, tanh
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
-from .network import TIBNN2, LayeredTIBNN2
+from .network import TIBNN2, LayeredTIBNN2, _vector_pack, _vector_unpack
 from ..dist import MatrixNormal
 from .activation import LearnTanh
 
@@ -212,7 +212,16 @@ class TIBNN2Guide(PyroModule):
             "Sigma_tril": torch.linalg.cholesky(Sigma)
         }
 
-    def forward(self, *, X_train: torch.Tensor, Y_train: torch.Tensor, X_pred: torch.Tensor = None):
+    def forward(self, *, 
+                X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
+                X_pred: torch.Tensor = None):
+        # Fill in training data
+        X_train = X_train if X_train is not None else self.model.X_train
+        if X_train is None:
+            raise ValueError("Must supply X_train")
+        Y_train = Y_train if Y_train is not None else self.model.Y_train
+        if Y_train is None:
+            raise ValueError("Must supply Y_train")
 
         do_pred = (X_pred is not None)
 
@@ -288,33 +297,46 @@ class TIBNN2Guide(PyroModule):
         return self.model.unnorm(ll_X_pred @ full_matrix.mT)
 
 
-def _tensor_pack(tensors):
-    return torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0)
-
-def _tensor_unpack(tensor, shapes):
-    assert tensor.ndim == 2
-    splits = torch.split(tensor, [s[:-1].numel() for s in shapes])
-    return tuple(t.reshape(s) for t,s in zip(splits, shapes))
-
-
 class LayeredTIBNN2Guide(PyroModule):
 
     def __init__(self, model: LayeredTIBNN2, init_style = "prior"):
+        super().__init__()
         self.aux = TIBNN2Guide(model.aux, init_style)
         self.main = TIBNN2Guide(model.main, init_style)
+        self._model = (model,) # Do not register model as submodule
 
-    def forward(self, X1_train:torch.Tensor, X2_train:torch.Tensor, Y1_train:torch.Tensor, Y2_train:torch.Tensor, X_pred:torch.Tensor = None):
+    @property
+    def model(self):
+        return self._model[0]
+
+    def forward(self, 
+                X1_train:torch.Tensor = None, X2_train:torch.Tensor = None, 
+                Y1_train:torch.Tensor = None, Y2_train:torch.Tensor = None, 
+                X_pred:torch.Tensor = None):
+        # Fill in training data
+        X1_train = X1_train if X1_train is not None else self.model.X1_train
+        if X1_train is None:
+            raise ValueError("Must supply X1_train")
+        X2_train = X2_train if X2_train is not None else self.model.X2_train
+        if X2_train is None:
+            raise ValueError("Must supply X2_train")
+        Y1_train = Y1_train if Y1_train is not None else self.model.Y1_train
+        if Y1_train is None:
+            raise ValueError("Must supply Y1_train")
+        Y2_train = Y2_train if Y2_train is not None else self.model.Y2_train
+        if Y2_train is None:
+            raise ValueError("Must supply Y2_train")
 
         do_pred = (X_pred is not None)
 
         if do_pred:
-            aux_X_pred = _tensor_pack([X2_train, X_pred])
+            aux_X_pred = _vector_pack([X2_train, X_pred])
         else:
             aux_X_pred = X2_train
         with scope(prefix = "aux"):
             aux_mu = self.aux(X_train = X1_train, Y_train = Y1_train, X_pred = aux_X_pred)
         if do_pred:
-            main_feed_train, main_feed_pred = _tensor_unpack(aux_mu, [X2_train.shape, X_pred.shape])
+            main_feed_train, main_feed_pred = _vector_unpack(aux_mu, [X2_train.shape[:-1], X_pred.shape[:-1]])
         else:
             main_feed_train = aux_mu
         
