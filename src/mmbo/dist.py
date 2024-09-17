@@ -129,49 +129,31 @@ class MatrixNormal(TorchDistribution):
         self.row_scale_tril = row_scale_tril.expand(row_full_shape)
         self.col_scale_tril = col_scale_tril.expand(col_full_shape)
 
-        self.stdnorm = dist.Normal(0,1).expand(batch_shape + event_shape).to_event(2)
-
         super().__init__(batch_shape, event_shape, validate_args = validate_args)
-    
-    @property
-    def n(self):
-        return self.event_shape[0]
-    
-    @property
-    def p(self):
-        return self.event_shape[1]
-
-    @property
-    def V_logdet(self):
-        return 2 * self.col_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
-    
-    @property
-    def U_logdet(self):
-        return 2 * self.row_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
 
     def rsample(self, sample_shape = torch.Size()):
         shape = self._extended_shape(sample_shape)
-        eps = self.stdnorm.sample(sample_shape)
+        eps = torch.randn(shape, device=self.loc.device, dtype=self.loc.dtype)
         return self.loc + self.row_scale_tril @ eps @ self.col_scale_tril.mT
     
     def log_prob(self, value):
         if self._validate_args:
             self._validate_sample(value)
-
-        normconst = torch.log(torch.tensor(2 * torch.pi)) * self.n * self.p / 2
+        twopi = torch.tensor(2 * torch.pi, dtype=value.dtype, device=value.device)
+        n, p = self.event_shape
+        normconst = torch.log(twopi) * n * p / 2
+        half_U_logdet = self.row_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
+        half_V_logdet = self.col_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
         halftrace = torch.linalg.solve_triangular(
             self.col_scale_tril.mT, 
             torch.linalg.solve_triangular(self.row_scale_tril, value - self.loc, upper=False), 
             upper=True, left=False
         )
-        if self.n > self.p:
-            trace = (halftrace.mT @ halftrace).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
-        else:
-            trace = (halftrace @ halftrace.mT).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+        trace = halftrace.pow(2).sum(dim=[-2,-1]) # tr(A^T A) = sum of squared elements of A
         # Old calculation
         #trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
 
-        return - trace / 2 - normconst - self.U_logdet * self.p / 2 - self.V_logdet * self.n / 2
+        return - trace / 2 - normconst - half_U_logdet * p - half_V_logdet * n
 
 
 class ConditionalMultivariateNormal(TorchDistribution):
