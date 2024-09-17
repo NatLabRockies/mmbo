@@ -170,7 +170,7 @@ class TIBNN2(PyroModule):
                 if self.fixed_scale is None:
                     scale = pyro.sample(
                         "scale", 
-                        dist.LogNormal(1, 1)
+                        dist.Gamma(1+math.log(2), math.log(2))
                     )
                 else:
                     scale = self.fixed_scale
