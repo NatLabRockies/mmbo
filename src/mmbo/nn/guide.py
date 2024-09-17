@@ -13,6 +13,7 @@ from torch.distributions.multivariate_normal import _precision_to_scale_tril
 from .network import TIBNN2, LayeredTIBNN2, _vector_pack, _vector_unpack
 from ..dist import MatrixNormal
 from .activation import LearnTanh
+from ..transforms import unitdet_lower_cholesky
 
 __all__ = ["TIBNN2Guide", "LayeredTIBNN2Guide"]
 
@@ -33,9 +34,8 @@ def _woodbury_inv(A_inv, X, C_inv = None):
     if C_inv is None:
         # C is the identity, auto-generate C_inv = I
         n = X.shape[-2]
-        smaller_inv = torch.linalg.inv(torch.eye(n) + X @ A_inv @ X.mT)
-    else:
-        smaller_inv = torch.linalg.inv(C_inv + X @ A_inv @ X.mT)
+        C_inv = torch.eye(n, device = A_inv.device, dtype = A_inv.dtype)
+    smaller_inv = torch.linalg.inv(C_inv + X @ A_inv @ X.mT)
     return A_inv - A_inv @ X.mT @ smaller_inv @ X @ A_inv
 
 class _IndependentLinearGuide(PyroModule):
@@ -127,7 +127,7 @@ class TIBNN2Guide(PyroModule):
     """A custom guide for TIBNN models that captures the kinds of posterior dependence
     that matters for the model's predictive abilities."""
 
-    def __init__(self, model: TIBNN2, init_style = "prior"):
+    def __init__(self, model: TIBNN2, init_style = "prior", family = "independent"):
         super().__init__()
 
         self._model = (model,) # Do not register model as submodule
@@ -135,14 +135,22 @@ class TIBNN2Guide(PyroModule):
             self.init_style = init_style
         else:
             raise ValueError(f"Invalid value '{init_style}' for init_style")
+        if family in ["independent", "matrixnormal"]:
+            self.family = family
+        else:
+            raise ValueError(f"Invalid value '{family}' for family")
         
         # Parameters
         self.layers = PyroModuleList([])
         insize = model.n_feat
         outsize = model.width
         for _ in range(model.depth):
-            #self.layers.append(_IndependentLinearGuide(insize, outsize, init_style, model.fixed_scale))
-            self.layers.append(_MatrixNormalLinearGuide(insize, outsize, init_style, model.fixed_scale))
+            if self.family == "independent":
+                self.layers.append(_IndependentLinearGuide(insize, outsize, init_style, model.fixed_scale))
+            elif self.family == "matrixnormal":
+                self.layers.append(_MatrixNormalLinearGuide(insize, outsize, init_style, model.fixed_scale))
+            else:
+                raise Exception("How did I get here?")
             insize = model.width
 
     @property
@@ -299,10 +307,10 @@ class TIBNN2Guide(PyroModule):
 
 class LayeredTIBNN2Guide(PyroModule):
 
-    def __init__(self, model: LayeredTIBNN2, init_style = "prior"):
+    def __init__(self, model: LayeredTIBNN2, init_style = "prior", family = "independent"):
         super().__init__()
-        self.aux = TIBNN2Guide(model.aux, init_style)
-        self.main = TIBNN2Guide(model.main, init_style)
+        self.aux = TIBNN2Guide(model.aux, init_style, family)
+        self.main = TIBNN2Guide(model.main, init_style, family)
         self._model = (model,) # Do not register model as submodule
 
     @property
