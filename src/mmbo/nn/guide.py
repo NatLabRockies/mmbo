@@ -13,30 +13,30 @@ from torch.distributions.multivariate_normal import _precision_to_scale_tril
 from .network import TIBNN2, LayeredTIBNN2, _vector_pack, _vector_unpack
 from ..dist import MatrixNormal
 from .activation import LearnTanh
-from ..transforms import unitdet_lower_cholesky
 
 __all__ = ["TIBNN2Guide", "LayeredTIBNN2Guide"]
 
 
-def _woodbury_inv(A_inv, X, C_inv = None):
-    """Inverts a matrix of the form M = (A + X^T * C * X) using a simplified
-    Woodbury identity,
+def _woodbury_inv(A_inv_diag: torch.Tensor, X: torch.Tensor, C_inv: torch.Tensor = None):
+    """Inverts a matrix of the form M = (A + X^T * C * X), where A is diagonal,
+    using a simplified Woodbury identity,
     M^(-1) = A^(-1) - A^(-1) * X^T * (C^(-1) + X * A^(-1) * X^T)^(-1) * X * A^(-1)
-    or
-    M^(-1) = A^(-1) - A^(-1) * X^T * (I + X * A^(-1) * X^T)^(-1) * X * A^(-1)
-    if C is the identity matrix. Omitting C_inv (C_inv = None) implies C = I.
+    Omitting C_inv (C_inv = None) implies C = I.
     A is p-by-p, X is n-by-p, and C is n-by-n. If n < p (X is wide), this is 
     faster than directly inverting M because only a n-by-n matrix needs to be 
     inverted rather than a p-by-p matrix.
     Notice that only the inverses of A and C are required in the formula so this
-    function accepts a precomputed A_inv and C_inv.
+    function accepts a precomputed A_inv_diag and C_inv.
     """
     if C_inv is None:
         # C is the identity, auto-generate C_inv = I
         n = X.shape[-2]
-        C_inv = torch.eye(n, device = A_inv.device, dtype = A_inv.dtype)
-    smaller_inv = torch.linalg.inv(C_inv + X @ A_inv @ X.mT)
-    return A_inv - A_inv @ X.mT @ smaller_inv @ X @ A_inv
+        device = A_inv_diag.device
+        dtype = A_inv_diag.dtype
+        C_inv = torch.eye(n, device = device, dtype = dtype)
+    X_scaled = X * A_inv_diag.unsqueze(-2) # Column-scaled X, as if post-multiplied by A^(-1) 
+    B = C_inv + X_scaled @ X.mT
+    return A_inv_diag.diag_embed() - X_scaled.mT @ torch.linalg.solve(B, X_scaled)
 
 class _IndependentLinearGuide(PyroModule):
     """A PyroModule that contains parameters for a dense linear layer, and samples
