@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-	"setuptools>=61.0",
+	"setuptools>=64.0",
     "setuptools-scm>=8.0",
 ]
 build-backend = "setuptools.build_meta"
@@ -12,20 +12,31 @@ include-package-data = true
 name = "mmbo"
 version = "0.0.1"
 dependencies = [
-	"scikit-learn",
-	"scipy",
 	"numpy",
 	"pandas",
+	"pyro-ppl",
+	"scikit-learn",
+	"scipy",
+	"torch",
 ]
 authors = [
 	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
 ]
 description = "Multimodal Bayesian Optimization"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 classifiers = [
 	"Programming Language :: Python :: 3",
 	"Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+notebooks = [
+	"ipykernel",
+	"ipywidgets",
+	"matplotlib",
+	"numpyro",
+	"seaborn",
 ]
 
 [project.urls]
