@@ -10,11 +10,14 @@ __all__ = ["li2_energy", "be2_energy", "era_wind", "nice_periodic", "noisy_uvadl
 # Generate test functions from pandas dataframes by cubic interpolation
 def _make_tablefunc(data, xcol, default=None): 
     functions = {
-        col:interpolate.CubicSpline(data.loc[:,xcol], data.loc[:,col], extrapolate=False) 
-        for col in data.columns if col != xcol
+        col:interpolate.CubicSpline(
+            data.loc[~data.loc[:,col].isna(),xcol], 
+            data.loc[~data.loc[:,col].isna(),col], 
+            extrapolate=False
+        ) for col in data.columns if col != xcol
     }
     def func(x, m=default):
-        return functions[m](x)
+        return torch.tensor(functions[m](x))
     func.modes = [col for col in data.columns if col != xcol]
     func.default = default
     return func
