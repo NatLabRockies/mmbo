@@ -347,4 +347,7 @@ class LayeredTIBNN2(PyroModule):
             main_X_pred = None
         with scope(prefix = "main"):
             main_mu = self.main(X_train = main_X_train, Y_train = Y2_train, X_pred = main_X_pred)
+        # Rename main/mu_pred as just mu_pred to conform to TIBNN2 naming
+        if do_pred:
+            pyro.deterministic("mu_pred", main_mu, event_dim = 1)
         return main_mu
