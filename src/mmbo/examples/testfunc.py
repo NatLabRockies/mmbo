@@ -65,8 +65,8 @@ def noisy_uvadlc(X: torch.Tensor):
 
 def branin_hf(X: torch.Tensor):
     assert X.shape[-1] == 2
-    x1 = X[...,0]
-    x2 = X[...,1]
+    x1 = X[...,0].unsqueeze(-1)
+    x2 = X[...,1].unsqueeze(-1)
     if not torch.all(
         torch.logical_and(
             torch.logical_and(x1 <= 10, x1 >= -5),
@@ -80,8 +80,8 @@ def branin_hf(X: torch.Tensor):
 def branin_lf(X: torch.Tensor, A1):
     assert X.shape[-1] == 2
     assert (A1 >= 0) and (A1 <= 1)
-    x1 = X[...,0]
-    x2 = X[...,1]
+    x1 = X[...,0].unsqueeze(-1)
+    x2 = X[...,1].unsqueeze(-1)
     parabola = (x2 - (5.1 / (4 * torch.pi ** 2)) * (x1 ** 2) + (5 / torch.pi) * x1 - 6) ** 2
     return branin_hf(X) - (A1 + 0.5) * parabola
 
@@ -89,22 +89,22 @@ def paciorek_hf(X: torch.Tensor):
     d = X.shape[-1]
     if not torch.all(torch.logical_and(X >= 0.3, X <= 1.0)):
         raise ValueError("X values out of bounds: [0.3, 1]")
-    return torch.sin(1 / X.prod(dim=-1))
+    return torch.sin(1 / X.prod(dim=-1, keepdim = True))
 
 def paciorek_lf(X: torch.Tensor, A2):
     d = X.shape[-1]
     assert (A2 >= 0) and (A2 <= 1)
-    return paciorek_hf(X) - 9 * A2**2 * torch.cos(1 / X.prod(dim=-1))
+    return paciorek_hf(X) - 9 * A2**2 * torch.cos(1 / X.prod(dim=-1, keepdim = True))
 
 def trid_hf(X: torch.Tensor):
     d = X.shape[-1]
-    parabola = ((X - 1.0) ** 2).sum(dim=-1)
-    interact = (X[...,1:] * X[...,:-1]).sum(dim=-1)
+    parabola = ((X - 1.0) ** 2).sum(dim=-1, keepdim = True)
+    interact = (X[...,1:] * X[...,:-1]).sum(dim=-1, keepdim = True)
     return parabola - interact
 
 def trid_lf(X: torch.Tensor, A4):
     d = X.shape[-1]
     assert (A4 >= 0) and (A4 <= 1)
-    parabola = ((X - A4) ** 2).sum(dim=-1)
-    interact = (A4 - 0.65) * (torch.arange(2, d+1) * X[...,1:] * X[...,:-1]).sum(dim=-1)
+    parabola = ((X - A4) ** 2).sum(dim=-1, keepdim = True)
+    interact = (A4 - 0.65) * (torch.arange(2, d+1) * X[...,1:] * X[...,:-1]).sum(dim=-1, keepdim = True)
     return parabola - interact
