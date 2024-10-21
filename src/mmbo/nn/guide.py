@@ -175,7 +175,8 @@ class TIBNN2Guide(PyroModule):
         #Lambda = torch.linalg.inv(Lambda_inv)
         #Lambda_tril = torch.linalg.cholesky(Lambda)
         Lambda_tril = _precision_to_scale_tril(Lambda_inv)
-        #B = Lambda @ (X.mT @ Y)
+        #B = Lambda_tril @ Lambda_tril.mT @ X.mT @ Y # Is this better?
+        #B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y]) # Is this better?
         B = torch.linalg.solve(Lambda_inv, X.mT @ Y)
         SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
         Prior_dist = B.mT @ self.model.Lambda0_inv @ B
@@ -297,7 +298,8 @@ class TIBNN2Guide(PyroModule):
             full_matrix = pyro.sample(
                 "full_matrix", 
                 MatrixNormal(posterior["B"].mT, 
-                             row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(precision)), 
+                             #row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(precision)), 
+                             row_scale_tril = _precision_to_scale_tril(precision),
                              col_scale_tril = posterior["Lambda_tril"])
             )
 
