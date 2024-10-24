@@ -156,6 +156,10 @@ class MatrixNormal(TorchDistribution):
         return - trace / 2 - normconst - half_U_logdet * p - half_V_logdet * n
 
 
+def _make_symmetric(A: torch.Tensor):
+    """Make a matrix symmetric by reflecting its lower triangular elements."""
+    return A.tril() + A.tril(diagonal = -1).mT
+
 class ConditionalMultivariateNormal(TorchDistribution):
     """
     A class representing the conditional multivariate normal distribution
@@ -232,7 +236,7 @@ class ConditionalMultivariateNormal(TorchDistribution):
                 continue
             elif not any(pattern):
                 # No conditioning, just use full distribution
-                conditional = dist.MultivariateNormal(self.loc[row_mask], scale_tril = self.scale_tril[row_mask])
+                conditional = dist.MultivariateNormal(self.loc[row_mask], scale_tril = self.scale_tril[row_mask], validate_args = self._validate_args)
             else:
                 # Compute conditional distribution
                 mu1 = self.loc[row_mask][:,col_miss]
@@ -241,12 +245,13 @@ class ConditionalMultivariateNormal(TorchDistribution):
                 Sigma22 = self.covariance_matrix[row_mask][:,col_obs][:,:,col_obs]
                 Sigma12 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_obs]
                 x = self.condition[row_mask][:,col_obs]
-                mu = mu1 + (Sigma12 @ torch.linalg.solve(Sigma22, (x - mu2).unsqueeze(-1))).squeeze(-1)
-                Sigma = Sigma11 - Sigma12 @ torch.linalg.solve(Sigma22, Sigma12.mT)
-                conditional = dist.MultivariateNormal(mu, Sigma)
+                premul = torch.linalg.solve(Sigma22.mT, Sigma12.mT).mT # Sigma12 @ Sigma22^(-1)
+                mu = mu1 + (premul @ (x - mu2).unsqueeze(-1)).squeeze(-1)
+                Sigma = Sigma11 - _make_symmetric(premul @ Sigma12.mT)
+                conditional = dist.MultivariateNormal(mu, Sigma, validate_args = self._validate_args)
             # Insert random samples into the appropriate places
             write_to = torch.logical_and(row_mask.unsqueeze(-1), col_miss)
-            result[...,write_to]= conditional.rsample(sample_shape).reshape(*sample_shape, -1)
+            result[...,write_to] = conditional.rsample(sample_shape).reshape(*sample_shape, -1)
         
         return result
     
