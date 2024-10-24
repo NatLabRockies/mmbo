@@ -17,7 +17,7 @@ def _make_tablefunc(data, xcol, default=None):
         ) for col in data.columns if col != xcol
     }
     def func(x, m=default):
-        return torch.tensor(functions[m](x))
+        return torch.tensor(functions[m](x), dtype=x.dtype)
     func.modes = [col for col in data.columns if col != xcol]
     func.default = default
     return func
