@@ -194,7 +194,7 @@ class TIBNN2(PyroModule):
         # matrix) have expectation self.prior_variance
         precision = pyro.sample(
             "precision", 
-            dist.Wishart(self.nu0, scale_tril = self.V0_tril)
+            dist.Wishart(self.nu0, scale_tril = self.V0_tril, validate_args = False)
         )
 
         # Weights and biases with conjugate Matrix Normal prior distribution
@@ -219,13 +219,20 @@ class TIBNN2(PyroModule):
             mu_normed_pred = activation_pred
         with data_plate():
             mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
-            obs_normed = pyro.sample("obs_normed", dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision), obs=Y_normed)
+            obs_normed = pyro.sample(
+                "obs_normed", 
+                dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
+                obs=Y_normed
+            )
         if do_pred:
             with pred_plate():
                 mu_pred = pyro.deterministic("mu_pred", self.unnorm(mu_normed_pred), event_dim = 1)
         # If Y_normed is None: obs_normed is sampled, Y_normed_full is fully conditioned (Delta distribution)
         # If Y_normed is not None: obs_normed is a matrix with some nans, as expected for ConditionalMultivariateNormal
-        pyro.sample("Y_normed_full", ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision).to_event(mu_normed.ndim - 1))
+        pyro.sample(
+            "Y_normed_full", 
+            ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
+        )
         
         return mu_pred if do_pred else mu
 

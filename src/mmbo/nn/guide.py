@@ -291,7 +291,7 @@ class TIBNN2Guide(PyroModule):
         # Precision matrix from full conditional
         precision = pyro.sample(
             "precision", 
-            dist.Wishart(posterior["nu"], scale_tril = posterior["V_tril"])
+            dist.Wishart(posterior["nu"], scale_tril = posterior["V_tril"], validate_args = False)
         )
         # Weights and bias full conditional with conjugate Matrix Normal prior distribution
         with scope(prefix = "last"):
