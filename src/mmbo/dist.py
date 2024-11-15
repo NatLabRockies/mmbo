@@ -156,9 +156,28 @@ class MatrixNormal(TorchDistribution):
         return - trace / 2 - normconst - half_U_logdet * p - half_V_logdet * n
 
 
-def _make_symmetric(A: torch.Tensor):
-    """Make a matrix symmetric by reflecting its lower triangular elements."""
-    return A.tril() + A.tril(diagonal = -1).mT
+def _make_symmetric(A: torch.Tensor) -> torch.Tensor:
+    """Make a matrix symmetric by averaging it with its transpose."""
+    return (A + A.mT) / 2
+
+def _make_positive_definite(A: torch.Tensor) -> torch.Tensor:
+    """Make a matrix positive definite, if necessary, by making it symmetric 
+    and adding a ridge to its diagonal."""
+    is_posdef = constraints.positive_definite.check(A)
+    if not is_posdef.all():
+        eps = 1e-6
+        d = A.shape[-1]
+        A_sym = _make_symmetric(A[is_posdef.logical_not()])
+        # Don't worry about gradients through the adding of the ridge, i.e.,
+        # "magically" find a constant that we're adding.
+        min_eigvals = torch.linalg.eigvals(A_sym).real.min(dim=-1).values.detach()
+        to_add = (-min_eigvals + eps).clamp(min=0)
+        ridge = to_add.unsqueeze(-1).expand((*to_add.shape, d)).diag_embed()
+        result = A.clone()
+        result[is_posdef.logical_not()] = A_sym + ridge
+    else:
+        result = A
+    return result
 
 class ConditionalMultivariateNormal(TorchDistribution):
     """
@@ -247,7 +266,7 @@ class ConditionalMultivariateNormal(TorchDistribution):
                 x = self.condition[row_mask][:,col_obs]
                 premul = torch.linalg.solve(Sigma22.mT, Sigma12.mT).mT # Sigma12 @ Sigma22^(-1)
                 mu = mu1 + (premul @ (x - mu2).unsqueeze(-1)).squeeze(-1)
-                Sigma = Sigma11 - _make_symmetric(premul @ Sigma12.mT)
+                Sigma = _make_positive_definite(Sigma11 - premul @ Sigma12.mT)
                 conditional = dist.MultivariateNormal(mu, Sigma, validate_args = self._validate_args)
             # Insert random samples into the appropriate places
             write_to = torch.logical_and(row_mask.unsqueeze(-1), col_miss)
@@ -266,9 +285,9 @@ class ConditionalMultivariateNormal(TorchDistribution):
         # Calculate conditional density as p(y|x) = p(y,x)/p(x)
         # Automatically broadcasts in subtraction, result will have
         # result shape.
+        result = self.unconditioned.log_prob(value) - self.unconditioned.log_prob(self.condition)
         # Fill in places where conditional values don't match with -inf
         # Performs some unnecessary computation where nonmatch == True, but
         # simplifies the code significantly.
-        result = self.unconditioned.log_prob(value) - self.unconditioned.log_prob(self.condition)
         result[nonmatch] = -torch.inf
         return result
