@@ -154,11 +154,28 @@ class MatrixNormal(TorchDistribution):
         #trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
 
         return - trace / 2 - normconst - half_U_logdet * p - half_V_logdet * n
+    
+    def entropy(self):
+        raise NotImplementedError # For now, catch if this is actually being used anywhere
+        twopi = torch.tensor(2 * torch.pi, 
+                             dtype=self.row_scale_tril.dtype, 
+                             device=self.row_scale_tril.device)
+        n, p = self.event_shape
+        half_U_logdet = self.row_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
+        half_V_logdet = self.col_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
+        return n * half_V_logdet + p * half_U_logdet + (torch.log(twopi) + 1) * n * p / 2
 
 
 def _make_symmetric(A: torch.Tensor) -> torch.Tensor:
     """Make a matrix symmetric by averaging it with its transpose."""
-    return (A + A.mT) / 2
+    is_symmetric = constraints.symmetric.check(A)
+    if not is_symmetric.all():
+        # Only correct matrices where is_symmetric is False
+        result = A.clone()
+        result[is_symmetric.logical_not()] = (A[is_symmetric.logical_not()] + A[is_symmetric.logical_not()].mT) / 2
+    else:
+        result = A
+    return result
 
 def _make_positive_definite(A: torch.Tensor) -> torch.Tensor:
     """Make a matrix positive definite, if necessary, by making it symmetric 
@@ -167,13 +184,14 @@ def _make_positive_definite(A: torch.Tensor) -> torch.Tensor:
     if not is_posdef.all():
         eps = 1e-6
         d = A.shape[-1]
+        result = A.clone()
+        # Only correct matrices where is_posdef is False
         A_sym = _make_symmetric(A[is_posdef.logical_not()])
         # Don't worry about gradients through the adding of the ridge, i.e.,
         # "magically" find a constant that we're adding.
-        min_eigvals = torch.linalg.eigvals(A_sym).real.min(dim=-1).values.detach()
+        min_eigvals = torch.linalg.eigvals(A_sym.detach()).real.min(dim=-1).values
         to_add = (-min_eigvals + eps).clamp(min=0)
         ridge = to_add.unsqueeze(-1).expand((*to_add.shape, d)).diag_embed()
-        result = A.clone()
         result[is_posdef.logical_not()] = A_sym + ridge
     else:
         result = A
@@ -250,26 +268,26 @@ class ConditionalMultivariateNormal(TorchDistribution):
         for pattern in patterns:
             col_obs = torch.tensor(pattern) # event_shape
             col_miss = col_obs.logical_not() # event_shape
-            row_mask = (is_observed == col_obs).all(-1) # batch_shape
+            batch_mask = (is_observed == col_obs).all(-1) # batch_shape
             if all(pattern):
                 continue
             elif not any(pattern):
                 # No conditioning, just use full distribution
-                conditional = dist.MultivariateNormal(self.loc[row_mask], scale_tril = self.scale_tril[row_mask], validate_args = self._validate_args)
+                conditional = dist.MultivariateNormal(self.loc[batch_mask], scale_tril = self.scale_tril[batch_mask], validate_args = self._validate_args)
             else:
                 # Compute conditional distribution
-                mu1 = self.loc[row_mask][:,col_miss]
-                mu2 = self.loc[row_mask][:,col_obs]
-                Sigma11 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_miss]
-                Sigma22 = self.covariance_matrix[row_mask][:,col_obs][:,:,col_obs]
-                Sigma12 = self.covariance_matrix[row_mask][:,col_miss][:,:,col_obs]
-                x = self.condition[row_mask][:,col_obs]
+                mu1 = self.loc[batch_mask][:,col_miss]
+                mu2 = self.loc[batch_mask][:,col_obs]
+                Sigma11 = self.covariance_matrix[batch_mask][:,col_miss][:,:,col_miss]
+                Sigma22 = self.covariance_matrix[batch_mask][:,col_obs][:,:,col_obs]
+                Sigma12 = self.covariance_matrix[batch_mask][:,col_miss][:,:,col_obs]
+                x = self.condition[batch_mask][:,col_obs]
                 premul = torch.linalg.solve(Sigma22.mT, Sigma12.mT).mT # Sigma12 @ Sigma22^(-1)
                 mu = mu1 + (premul @ (x - mu2).unsqueeze(-1)).squeeze(-1)
                 Sigma = _make_positive_definite(Sigma11 - premul @ Sigma12.mT)
                 conditional = dist.MultivariateNormal(mu, Sigma, validate_args = self._validate_args)
             # Insert random samples into the appropriate places
-            write_to = torch.logical_and(row_mask.unsqueeze(-1), col_miss)
+            write_to = torch.logical_and(batch_mask.unsqueeze(-1), col_miss)
             result[...,write_to] = conditional.rsample(sample_shape).reshape(*sample_shape, -1)
         
         return result
