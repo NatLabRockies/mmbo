@@ -266,7 +266,7 @@ class ConditionalMultivariateNormal(TorchDistribution):
         patterns = sorted(set(map(tuple, is_observed.reshape(-1, *self.event_shape).tolist()))) 
 
         for pattern in patterns:
-            col_obs = torch.tensor(pattern) # event_shape
+            col_obs = torch.tensor(pattern, dtype = result.dtype, device = result.device) # event_shape
             col_miss = col_obs.logical_not() # event_shape
             batch_mask = (is_observed == col_obs).all(-1) # batch_shape
             if all(pattern):
