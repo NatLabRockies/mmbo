@@ -1,6 +1,8 @@
+import torch
+from torch.distributions.utils import _standard_normal
+
 from pyro.distributions import TorchDistribution
 import pyro.distributions as dist
-import torch
 from pyro.distributions import constraints
 from pyro.distributions import transforms
 import functools
@@ -133,7 +135,7 @@ class MatrixNormal(TorchDistribution):
 
     def rsample(self, sample_shape = torch.Size()):
         shape = self._extended_shape(sample_shape)
-        eps = torch.randn(shape, device=self.loc.device, dtype=self.loc.dtype)
+        eps = _standard_normal(shape, dtype=self.loc.dtype, device=self.loc.device)
         return self.loc + self.row_scale_tril @ eps @ self.col_scale_tril.mT
     
     def log_prob(self, value):
