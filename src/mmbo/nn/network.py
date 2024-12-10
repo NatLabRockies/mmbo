@@ -120,7 +120,6 @@ class RegBNN(PyroModule):
                     BNNTanhLayer()
                 )    
             )
-            self.layers.append()
             insize = outsize
 
         # Last Layer Priors
@@ -144,7 +143,7 @@ class RegBNN(PyroModule):
         tensors X_train and Y_train"""
         n_feat = X_train.shape[-1]
         n_out = Y_train.shape[-1]
-        model = TIBNN2(n_feat, n_out, *args, **kwargs)
+        model = RegBNN(n_feat, n_out, *args, **kwargs)
         model.norm = PyroNormalizer.from_data(X_train)
         model.unnorm = PyroUnNormalizer.from_data(Y_train)
         model.X_train = X_train
