@@ -123,6 +123,40 @@ class _MatrixNormalLinearGuide(PyroModule):
         return weight,bias,scale
 
 
+class _DeltaLinearGuide(PyroModule):
+    """A PyroModule that contains parameters for a dense linear layer, and samples
+    weights and biases from Delta distributions. For use in a guide."""
+
+    def __init__(self, insize, outsize, init_style, fixed_scale = None):
+        super().__init__()
+        # Initial parameter values based on init_style
+        if init_style == "prior":
+            weight_loc_init = torch.zeros((outsize, insize))
+            bias_loc_init = torch.zeros((outsize,))
+            if fixed_scale is None:
+                scale_loc_init = torch.tensor(1.0)
+        else:
+            weight_loc_init = torch.randn((outsize, insize)) / math.sqrt(insize)
+            bias_loc_init = torch.randn((outsize,))
+            if fixed_scale is None:
+                scale_loc_init = dist.LogNormal(1, 0.1).sample()
+        # Create parameters
+        self.weight_loc = PyroParam(weight_loc_init)
+        self.bias_loc = PyroParam(bias_loc_init)
+        self.fixed_scale = fixed_scale
+        if fixed_scale is None:
+            self.scale_loc = PyroParam(scale_loc_init, constraint = constraints.positive)
+
+    def forward(self):
+        weight = pyro.sample("weight", dist.Delta(self.weight_loc, event_dim = 2))
+        bias = pyro.sample("bias", dist.Delta(self.bias_loc, event_dim = 1))
+        if self.fixed_scale is None:
+            scale = pyro.sample("scale", dist.Delta(self.scale_loc))
+        else:
+            scale = self.fixed_scale
+        return weight,bias,scale
+
+
 class TIBNN2Guide(PyroModule):
     """A custom guide for TIBNN models that captures the kinds of posterior dependence
     that matters for the model's predictive abilities."""
@@ -135,7 +169,7 @@ class TIBNN2Guide(PyroModule):
             self.init_style = init_style
         else:
             raise ValueError(f"Invalid value '{init_style}' for init_style")
-        if family in ["independent", "matrixnormal"]:
+        if family in ["independent", "matrixnormal", "delta", "middledelta"]:
             self.family = family
         else:
             raise ValueError(f"Invalid value '{family}' for family")
@@ -144,11 +178,19 @@ class TIBNN2Guide(PyroModule):
         self.layers = PyroModuleList([])
         insize = model.n_feat
         outsize = model.width
-        for _ in range(model.depth):
+        for i in range(model.depth):
             if self.family == "independent":
                 self.layers.append(_IndependentLinearGuide(insize, outsize, init_style, model.fixed_scale))
             elif self.family == "matrixnormal":
                 self.layers.append(_MatrixNormalLinearGuide(insize, outsize, init_style, model.fixed_scale))
+            elif self.family == "delta":
+                self.layers.append(_DeltaLinearGuide(insize, outsize, init_style, model.fixed_scale))
+            elif self.family == "middledelta":
+                # MatrixNormal for first (input) layer, delta for middle layers
+                if i == 0:
+                    self.layers.append(_MatrixNormalLinearGuide(insize, outsize, init_style, model.fixed_scale))
+                else:
+                    self.layers.append(_DeltaLinearGuide(insize, outsize, init_style, model.fixed_scale))
             else:
                 raise Exception("How did I get here?")
             insize = model.width
@@ -214,7 +256,8 @@ class TIBNN2Guide(PyroModule):
         a = a0 + n_obs / 2
         b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
         # Compile into posterior predictive and return
-        Sigma = (b / a) * (torch.eye(n_miss) + X_miss @ torch.linalg.solve(Lambda_inv, X_miss.mT))
+        Sigma = (b / a) * (torch.eye(n_miss, dtype=X_miss.dtype, device=X_miss.dtype) + 
+                           X_miss @ torch.linalg.solve(Lambda_inv, X_miss.mT))
         return {
             "df": 2 * a,
             "mu": (X_miss @ mu).squeeze(-1),
@@ -262,9 +305,9 @@ class TIBNN2Guide(PyroModule):
         # Conjugate prior with the previous layer activations serving as X
 
         # Append an intercept to the activations, at the training and prediciton sites
-        ll_X = torch.cat([torch.ones((*activation.shape[:-1], 1)), activation], dim=-1)
+        ll_X = torch.cat([torch.ones((*activation.shape[:-1], 1), dtype = activation.dtype, device = activation.device), activation], dim=-1)
         if do_pred:
-            ll_X_pred = torch.cat([torch.ones((*activation_pred.shape[:-1], 1)), activation_pred], dim=-1)
+            ll_X_pred = torch.cat([torch.ones((*activation_pred.shape[:-1], 1), dtype = activation_pred.dtype, device = activation_pred.device), activation_pred], dim=-1)
         else:
             ll_X_pred = ll_X
 
