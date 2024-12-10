@@ -1,11 +1,12 @@
 import math
 import functools
+from typing import Sequence, Callable
 
 import torch
 from torch.nn.functional import linear, tanh
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
-from pyro.nn import PyroModule, PyroModuleList
+from pyro.nn import PyroModule, PyroModuleList, PyroSample
 import pyro.distributions as dist
 import pyro
 import pyro.poutine as poutine
@@ -51,12 +52,13 @@ class BNNLinearLayer(PyroModule):
         # Scale the weights by the inverse square root of the input size,
         # known as the Neural Tangent Kernel parameterization?
         self.register_buffer("k", torch.as_tensor(1.0 / math.sqrt(insize)))
+        # Sample site for full matrix
+        self.bW = PyroSample(lambda self: dist.Normal(self.loc, self.scale).to_event(2))
 
-    def forward(self, *Xs):
-        bW = pyro.sample("bW", dist.Normal(self.loc, self.scale).to_event(2))
-        bias = pyro.deterministic("bias", bW[:,0])
-        weight = pyro.deterministic("weight", bW[:,1:])
-        return tuple(linear(X, self.k * weight, bias) for X in Xs)
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        bias = self.bW[:,0]
+        weight = self.bW[:,1:]
+        return linear(X, self.k * weight, bias)
 
 class BNNTanhLayer(PyroModule):
     
@@ -64,10 +66,11 @@ class BNNTanhLayer(PyroModule):
         super().__init__()
         self.register_buffer("scale_concentration", torch.as_tensor(scale_concentration))
         self.register_buffer("scale_rate", torch.as_tensor(scale_rate))
+        # Sample site for scaling factor
+        self.scale = PyroSample(lambda self: dist.Gamma(self.scale_concentration, self.scale_rate))
 
-    def forward(self, *Xs):
-        scale = pyro.sample("scale", dist.Gamma(self.scale_concentration, self.scale_rate))
-        return tuple(tanh(scale * X) for X in Xs)
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        return tanh(self.scale * X)
 
 class RegBNN(PyroModule):
     """Bayesian Neural Network for Regression class.
@@ -111,8 +114,13 @@ class RegBNN(PyroModule):
         self.layers = PyroModuleList([])
         insize = n_feat
         for outsize in hidden_widths:
-            self.layers.append(BNNLinearLayer(insize, outsize))
-            self.layers.append(BNNTanhLayer())
+            self.layers.append(
+                PyroModule[torch.nn.Sequential](
+                    BNNLinearLayer(insize, outsize),
+                    BNNTanhLayer()
+                )    
+            )
+            self.layers.append()
             insize = outsize
 
         # Last Layer Priors
@@ -176,15 +184,15 @@ class RegBNN(PyroModule):
         if do_pred:
             activation_pred = X_normed_pred
         for idx,layer in enumerate(self.layers):
+            activation = layer(activation)
+            if do_pred:
+                activation_pred = layer(activation_pred)
             with scope(prefix = f"layer{idx+1}"):
-                if do_pred:
-                    activation, activation_pred = layer(activation, activation_pred)
-                    with pred_plate():
-                        pyro.deterministic("activation_pred", activation_pred, event_dim = 1)
-                else:
-                    activation = layer(activation)
                 with data_plate():
                     pyro.deterministic("activation", activation, event_dim = 1)
+                if do_pred:
+                    with pred_plate():
+                        pyro.deterministic("activation_pred", activation_pred, event_dim = 1)
         
         # Last layer
 
