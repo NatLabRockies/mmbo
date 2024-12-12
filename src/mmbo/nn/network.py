@@ -197,7 +197,7 @@ class RegBNN(PyroModule):
 
         # Output multivariate normal precision matrix
         # Diagonal elements of the covariance matrix (inverse of the precision 
-        # matrix) have expectation self.prior_variance
+        # matrix) have both prior mean and prior sd of self.prior_variance
         precision = pyro.sample(
             "precision", 
             dist.Wishart(self.nu0, scale_tril = self.V0_tril, validate_args = False)
