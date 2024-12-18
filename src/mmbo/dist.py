@@ -5,9 +5,11 @@ from pyro.distributions import TorchDistribution
 import pyro.distributions as dist
 from pyro.distributions import constraints
 from pyro.distributions import transforms
+from pyro.distributions.score_parts import ScoreParts
 import functools
 
 from .transforms import softplus_positive_ordered_vector, real_matrix, nanmaskedreal_vector
+from .util import make_positive_definite
 
 __all__ = ["OrderedNormal", "OrderedHalfNormal", "MatrixNormal", "ConditionalMultivariateNormal"]
 
@@ -156,9 +158,8 @@ class MatrixNormal(TorchDistribution):
         #trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
 
         return - trace / 2 - normconst - half_U_logdet * p - half_V_logdet * n
-    
+
     def entropy(self):
-        raise NotImplementedError # For now, catch if this is actually being used anywhere
         twopi = torch.tensor(2 * torch.pi, 
                              dtype=self.row_scale_tril.dtype, 
                              device=self.row_scale_tril.device)
@@ -166,38 +167,6 @@ class MatrixNormal(TorchDistribution):
         half_U_logdet = self.row_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
         half_V_logdet = self.col_scale_tril.diagonal(offset=0, dim1=-1, dim2=-2).log().sum(-1)
         return n * half_V_logdet + p * half_U_logdet + (torch.log(twopi) + 1) * n * p / 2
-
-
-def _make_symmetric(A: torch.Tensor) -> torch.Tensor:
-    """Make a matrix symmetric by averaging it with its transpose."""
-    is_symmetric = constraints.symmetric.check(A)
-    if not is_symmetric.all():
-        # Only correct matrices where is_symmetric is False
-        result = A.clone()
-        result[is_symmetric.logical_not()] = (A[is_symmetric.logical_not()] + A[is_symmetric.logical_not()].mT) / 2
-    else:
-        result = A
-    return result
-
-def _make_positive_definite(A: torch.Tensor) -> torch.Tensor:
-    """Make a matrix positive definite, if necessary, by making it symmetric 
-    and adding a ridge to its diagonal."""
-    is_posdef = constraints.positive_definite.check(A)
-    if not is_posdef.all():
-        eps = 1e-6
-        d = A.shape[-1]
-        result = A.clone()
-        # Only correct matrices where is_posdef is False
-        A_sym = _make_symmetric(A[is_posdef.logical_not()])
-        # Don't worry about gradients through the adding of the ridge, i.e.,
-        # "magically" find a constant that we're adding.
-        min_eigvals = torch.linalg.eigvals(A_sym.detach()).real.min(dim=-1).values
-        to_add = (-min_eigvals + eps).clamp(min=0)
-        ridge = to_add.unsqueeze(-1).expand((*to_add.shape, d)).diag_embed()
-        result[is_posdef.logical_not()] = A_sym + ridge
-    else:
-        result = A
-    return result
 
 class ConditionalMultivariateNormal(TorchDistribution):
     """
@@ -286,7 +255,7 @@ class ConditionalMultivariateNormal(TorchDistribution):
                 x = self.condition[batch_mask][:,col_obs]
                 premul = torch.linalg.solve(Sigma22.mT, Sigma12.mT).mT # Sigma12 @ Sigma22^(-1)
                 mu = mu1 + (premul @ (x - mu2).unsqueeze(-1)).squeeze(-1)
-                Sigma = _make_positive_definite(Sigma11 - premul @ Sigma12.mT)
+                Sigma = make_positive_definite(Sigma11 - premul @ Sigma12.mT)
                 conditional = dist.MultivariateNormal(mu, Sigma, validate_args = self._validate_args)
             # Insert random samples into the appropriate places
             write_to = torch.logical_and(batch_mask.unsqueeze(-1), col_miss)
