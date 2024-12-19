@@ -3,7 +3,7 @@ import functools
 from typing import Sequence, Callable
 
 import torch
-from torch.nn.functional import linear, tanh
+from torch.nn.functional import linear, tanh, relu, elu, softplus, gelu, leaky_relu
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
 from pyro.nn import PyroModule, PyroModuleList, PyroSample
@@ -60,17 +60,26 @@ class BNNLinearLayer(PyroModule):
         weight = self.bW[:,1:]
         return linear(X, self.k * weight, bias)
 
-class BNNTanhLayer(PyroModule):
+class BNNActivationLayer(PyroModule):
     
-    def __init__(self, *, scale_concentration = 2.0, scale_rate = 1.0):
+    def __init__(self, func: str = "relu", *, scale_concentration = 2.0, scale_rate = 1.0):
         super().__init__()
         self.register_buffer("scale_concentration", torch.as_tensor(scale_concentration))
         self.register_buffer("scale_rate", torch.as_tensor(scale_rate))
+        self._funcs = {
+            "elu": elu, 
+            "gelu": gelu,
+            "leaky_relu": leaky_relu,
+            "relu": relu, 
+            "softplus": softplus,
+            "tanh": tanh
+        }
+        self.func = self._funcs[func]
         # Sample site for scaling factor
         self.scale = PyroSample(lambda self: dist.Gamma(self.scale_concentration, self.scale_rate))
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        return tanh(self.scale * X)
+        return self.func(self.scale * X)
 
 class RegBNN(PyroModule):
     """Bayesian Neural Network for Regression class.
@@ -81,13 +90,14 @@ class RegBNN(PyroModule):
         vector of 1d observations should be passed in as a k-by-1 tensor.
     n_out = dimension of output. Same caveat about dimension as n_feat.
     hidden_widths = an iterable of the number of neurons in each hidden layer. Must be at least length 1.
+    activation = Which activation function to use after hidden layers
     feature_means, feature_stds = used to normalize input before passing through network
     out_means, out_stds = used to un-normalize output after coming out of the network. Having these
         norm/unnorm layers in the network lets the Bayesian layers work with observations that are
         all mean zero variance one, which is much nicer statistically.
     """
 
-    def __init__(self, n_feat, n_out, hidden_widths=None, 
+    def __init__(self, n_feat, n_out, hidden_widths=None, activation="relu",
                  feature_means = None, feature_stds = None,
                  out_means = None, out_stds = None,
                  prior_variance = 0.01):
@@ -101,6 +111,7 @@ class RegBNN(PyroModule):
         self.n_out = n_out
         self.hidden_widths = hidden_widths
         self.prior_variance = prior_variance
+        self.activation = activation
 
         # Training data, if supplied
         self.register_buffer("X_train", None)
@@ -117,7 +128,7 @@ class RegBNN(PyroModule):
             self.layers.append(
                 PyroModule[torch.nn.Sequential](
                     BNNLinearLayer(insize, outsize),
-                    BNNTanhLayer()
+                    BNNActivationLayer(activation)
                 )    
             )
             insize = outsize
