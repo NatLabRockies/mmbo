@@ -7,11 +7,12 @@ import pyro
 from pyro.contrib.autoname import scope
 import torch
 from torch import nn
-from torch.nn.functional import linear, tanh
+from torch.nn.functional import linear, tanh, relu, elu, softplus, gelu, leaky_relu
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
 from .network import TIBNN2, LayeredTIBNN2, RegBNN, _vector_pack, _vector_unpack
-from ..dist import MatrixNormal
+from ..dist import MatrixNormal, ConditionalMultivariateNormal
+from ..util import make_positive_definite
 
 __all__ = ["TIBNN2Guide", "LayeredTIBNN2Guide", "RegBNNGuide"]
 
@@ -40,9 +41,10 @@ def _woodbury_inv(A_inv_diag: torch.Tensor, X: torch.Tensor, C_inv: torch.Tensor
 def _init_scale(n: int) -> torch.Tensor:
     """Generate a random cholesky factor of a positive definite matrix
     suitable for initializing MatrixNormal scale parameters."""
+    k = 2 * n
     sigma = torch.rand(n)
-    x = sigma * torch.randn((n,n))
-    return torch.linalg.cholesky(x.mT @ x)
+    x = sigma * torch.randn((k,n))
+    return torch.linalg.cholesky((torch.eye(n) + x.mT @ x / k) / 2)
 
 def _add_intercept(X: torch.Tensor) -> torch.Tensor:
     """Add a 'column' of ones to the left size of the last dimension.
@@ -187,22 +189,31 @@ class BNNLinearLayerGuide(PyroModule):
         weight = self.bW[:,1:]
         return linear(X, self.k * weight, bias)
 
-class BNNTanhLayerGuide(PyroModule):
+class BNNActivationLayerGuide(PyroModule):
 
-    def __init__(self):
+    def __init__(self, func: str = "relu"):
         super().__init__()
         self.scale_val = PyroParam(torch.as_tensor(1.0), constraint = constraints.positive)
         # Sample site for scaling factor - MAP estimate
         self.scale = PyroSample(lambda self: dist.Delta(self.scale_val))
+        self._funcs = {
+            "elu": elu, 
+            "gelu": gelu,
+            "leaky_relu": leaky_relu,
+            "relu": relu, 
+            "softplus": softplus,
+            "tanh": tanh 
+        }
+        self.func = self._funcs[func]
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        return tanh(self.scale * X)
+        return self.func(self.scale * X)
 
 class RegBNNGuide(PyroModule):
     """A custom guide for RegBNN models that captures the kind of posterior dependence
     that matters for the model's predictive abilities."""
 
-    def __init__(self, model: RegBNN):
+    def __init__(self, model: RegBNN, missingdata: str = "ppd"):
         super().__init__()
 
         self._model = (model,) # Do not register model as submodule
@@ -213,10 +224,26 @@ class RegBNNGuide(PyroModule):
             self.layers.append(
                 PyroModule[torch.nn.Sequential](
                     BNNLinearLayerGuide(insize, outsize),
-                    BNNTanhLayerGuide()
+                    BNNActivationLayerGuide(model.activation)
                 )    
             )
             insize = outsize
+        
+        allowed_missingdata = ["ppd", "mvn"]
+        if missingdata not in allowed_missingdata:
+            raise ValueError(f"missingdata must be one of {allowed_missingdata}")
+        self.missingdata = missingdata
+        if missingdata == "mvn":
+            h_last = model.hidden_widths[-1]
+            self.missing_bW_mean = PyroParam(torch.zeros(model.n_out, h_last + 1))
+            self.missing_bW_Lambda_tril = PyroParam(
+                model.Lambda0_tril @ _init_scale(h_last + 1),
+                constraint = constraints.lower_cholesky
+            )
+            self.missing_scale = PyroParam(
+                _init_scale(model.n_out) * math.sqrt(model.prior_variance), 
+                constraint = constraints.lower_cholesky
+            )
 
     @property
     def model(self):
@@ -236,17 +263,18 @@ class RegBNNGuide(PyroModule):
         Y = Y.reshape((-1, Y.shape[-1]))
 
         nu = self.model.nu0 + X.shape[:-1].numel()
-        Lambda_inv = self.model.Lambda0_inv + X.mT @ X
+        Lambda_inv = make_positive_definite(self.model.Lambda0_inv + X.mT @ X)
         #Lambda = torch.linalg.inv(Lambda_inv)
         #Lambda_tril = torch.linalg.cholesky(Lambda)
         Lambda_tril = _precision_to_scale_tril(Lambda_inv)
         #B = Lambda_tril @ Lambda_tril.mT @ X.mT @ Y # Is this better?
         #B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y]) # Is this better?
-        B = torch.linalg.solve(Lambda_inv, X.mT @ Y)
+        #B = torch.linalg.solve(Lambda_inv, X.mT @ Y)
+        B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y])
         SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
         Prior_dist = B.mT @ self.model.Lambda0_inv @ B
         #V_tril = torch.linalg.cholesky(torch.linalg.inv(self.model.V0_inv + SSE_dist + Prior_dist))
-        V_tril = _precision_to_scale_tril(self.model.V0_inv + SSE_dist + Prior_dist)
+        V_tril = _precision_to_scale_tril(make_positive_definite(self.model.V0_inv + SSE_dist + Prior_dist))
         return {
             "nu": nu,
             "Lambda_tril": Lambda_tril,
@@ -274,7 +302,7 @@ class RegBNNGuide(PyroModule):
         b0 = self.model.V0_inv[j,j] / 2
         Lambda0_inv = self.model.Lambda0_inv
         # Posterior parameters
-        Lambda_inv = Lambda0_inv + X_obs.mT @ X_obs
+        Lambda_inv = make_positive_definite(Lambda0_inv + X_obs.mT @ X_obs)
         mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
         a = a0 + n_obs / 2
         b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
@@ -284,7 +312,7 @@ class RegBNNGuide(PyroModule):
         return {
             "df": 2 * a,
             "mu": (X_miss @ mu).squeeze(-1),
-            "Sigma_tril": torch.linalg.cholesky(Sigma)
+            "Sigma_tril": torch.linalg.cholesky(make_positive_definite(Sigma))
         }
     
     def forward(self, *, 
@@ -329,22 +357,32 @@ class RegBNNGuide(PyroModule):
             ll_X_pred = ll_X
 
         # Fill in any missing data
-        Y_normed_full = Y_normed.clone()
-        Y_ismissing = Y_normed_full.isfinite().logical_not()
-        col_idx = torch.arange(0, Y_normed_full.shape[-1])
-        with scope(prefix = "missing_data"):
-            for j in range(Y_normed_full.shape[-1]):
-                if Y_ismissing[...,j].any():
-                    post_pred = self.missing_posterior_predictive(ll_X, Y_normed_full, j)
-                    with scope(prefix = f"{j}"):
-                        y_new = pyro.sample(
-                            "y_new",
-                            dist.MultivariateStudentT(post_pred["df"], post_pred["mu"], post_pred["Sigma_tril"]),
-                            infer = {'is_auxiliary': True}
-                        )
-                    write_to = torch.logical_and(Y_ismissing, col_idx == j)
-                    Y_normed_full[write_to] = y_new
-        pyro.sample("Y_normed_full", dist.Delta(Y_normed_full, event_dim = Y_normed_full.ndim))
+        if self.missingdata == "ppd":
+            Y_normed_full = Y_normed.clone()
+            Y_ismissing = Y_normed_full.isfinite().logical_not()
+            col_idx = torch.arange(0, Y_normed_full.shape[-1])
+            with scope(prefix = "missing_data"):
+                for j in range(Y_normed_full.shape[-1]):
+                    if Y_ismissing[...,j].any():
+                        post_pred = self.missing_posterior_predictive(ll_X, Y_normed_full, j)
+                        with scope(prefix = f"{j}"):
+                            y_new = pyro.sample(
+                                "y_new",
+                                dist.MultivariateStudentT(post_pred["df"], post_pred["mu"], post_pred["Sigma_tril"]),
+                                infer = {'is_auxiliary': True}
+                            )
+                        write_to = torch.logical_and(Y_ismissing, col_idx == j)
+                        Y_normed_full[write_to] = y_new
+            pyro.sample("Y_normed_full", dist.Delta(Y_normed_full, event_dim = Y_normed_full.ndim))
+        elif self.missingdata == "mvn":
+            missing_mean = ll_X @ self.missing_bW_mean.mT
+            missing_Lambda_diag = (ll_X @ self.missing_bW_Lambda_tril).pow(2).sum(dim=-1).unsqueeze(-1).unsqueeze(-1) + 1.0
+            missing_scale_tril = self.missing_scale * missing_Lambda_diag.sqrt()
+            Y_normed_full = pyro.sample(
+                "Y_normed_full", 
+                ConditionalMultivariateNormal(missing_mean, Y_normed, scale_tril = missing_scale_tril).to_event(1)
+            )
+        
 
         # Calculate last layer full conditional parameters and sample last layer sites
         posterior = self.lastlayer_posterior(ll_X, Y_normed_full)
