@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import scipy.interpolate as interpolate
 import importlib.resources as resources
 import pandas as pd
@@ -5,7 +7,8 @@ import numpy as np
 import torch
 
 __all__ = ["li2_energy", "be2_energy", "era_wind", "nice_periodic", "noisy_uvadlc",
-           "branin_hf", "branin_lf", "paciorek_hf", "paciorek_lf", "trid_hf", "trid_lf"]
+           "branin_hf", "branin_lf", "paciorek_hf", "paciorek_lf", "trid_hf", "trid_lf",
+           "timeseries_full", "timeseries_stat"]
 
 # Generate test functions from pandas dataframes by cubic interpolation
 def _make_tablefunc(data, xcol, default=None): 
@@ -63,6 +66,10 @@ def noisy_uvadlc(X: torch.Tensor):
     wave2 = 0.3 * torch.sin(4 * torch.pi * (X + noise))
     return X + wave1 + wave2 + noise
 
+#################################################################
+## Somewhat standard optimization / multifidelity test functions
+#################################################################
+
 def branin_hf(X: torch.Tensor):
     assert X.shape[-1] == 2
     x1 = X[...,0].unsqueeze(-1)
@@ -108,3 +115,45 @@ def trid_lf(X: torch.Tensor, A4):
     parabola = ((X - A4) ** 2).sum(dim=-1, keepdim = True)
     interact = (A4 - 0.65) * (torch.arange(2, d+1) * X[...,1:] * X[...,:-1]).sum(dim=-1, keepdim = True)
     return parabola - interact
+
+########################################################
+## Multimodal data test with time series
+########################################################
+
+def _ts_x_unpack(X: torch.Tensor) -> Tuple[torch.Tensor]:
+    assert X.shape[-1] == 4
+    rate = X[...,0].exp()
+    period = X[...,1].exp()
+    amp = X[...,2].exp()
+    phase = torch.tanh(X[...,3]) * torch.pi
+    return rate, period, amp, phase
+
+def timeseries_full(X: torch.Tensor, noise: float = 0.0, res: int = 100):
+    rate, period, amp, phase = _ts_x_unpack(X)
+    time = torch.linspace(0.0, 1.0, steps = res)
+    y = time.pow(rate.unsqueeze(-1)) + amp.unsqueeze(-1) * torch.cos(2.0 * torch.pi * time / period.unsqueeze(-1) + phase.unsqueeze(-1))
+    return y + torch.randn_like(y) * noise
+
+def timeseries_stat(X: torch.Tensor, m: str, res: int = 1000):
+    assert m in ["max", "min", "max_loc", "min_loc", "path_length", "avg_slope", "avg_value", "total_dist"]
+    ts = timeseries_full(X, noise = 0.0, res = res)
+    if m == "max":
+        return ts.max(dim = -1).values
+    elif m == "min":
+        return ts.min(dim = -1).values
+    elif m == "max_loc":
+        return ts.max(dim = -1).indices / (res - 1.0)
+    elif m == "min_loc":
+        return ts.min(dim = -1).indices / (res - 1.0)
+    elif m == "path_length":
+        delta = 1.0 / (res - 1.0)
+        changes = ts[...,1:] - ts[...,:(res-1)]
+        return (changes.pow(2) + delta ** 2).sqrt().sum(dim = -1)
+    elif m == "avg_slope":
+        return ts[...,res-1] - ts[...,0]
+    elif m == "avg_value":
+        return ts.mean(dim = -1)
+    elif m == "total_dist":
+        changes = ts[...,1:] - ts[...,:(res-1)]
+        return changes.abs().sum(dim = -1)
+
