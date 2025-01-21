@@ -15,7 +15,7 @@ from pyro.contrib.autoname import scope
 from .normalizer import PyroNormalizer, PyroUnNormalizer
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 
-__all__ = ["TIBNN2", "LayeredTIBNN2", "RegBNN"]
+__all__ = ["RegBNN", "LayeredRegBNN"]
 
 def _gen_Lambda0_tril(width, prior_variance):
         mat = torch.eye(width+1) / math.sqrt(width)
