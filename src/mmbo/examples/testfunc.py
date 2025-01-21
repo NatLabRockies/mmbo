@@ -156,4 +156,4 @@ def timeseries_stat(X: torch.Tensor, m: str, res: int = 1000):
     elif m == "total_dist":
         changes = ts[...,1:] - ts[...,:(res-1)]
         return changes.abs().sum(dim = -1)
-
+timeseries_stat.modes = ["max", "min", "max_loc", "min_loc", "path_length", "avg_slope", "avg_value", "total_dist"]
