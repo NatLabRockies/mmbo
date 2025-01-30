@@ -287,7 +287,11 @@ class LayeredRegBNN(PyroModule):
         super().__init__()
         
         # Create list of auxiliary networks
-        self.aux = PyroModuleList()
+        if out_aux_means is None:
+            out_aux_means = [None] * len(n_out_aux)
+        if out_aux_stds is None:
+            out_aux_stds = [None] * len(n_out_aux)
+        self.aux = PyroModuleList([])
         for out, means, stds in zip(n_out_aux, out_aux_means, out_aux_stds):
             self.aux.append(
                 RegBNN(n_feat, out, *args,
@@ -310,8 +314,8 @@ class LayeredRegBNN(PyroModule):
                            feature_means = feature_main_means, feature_stds = feature_main_stds,
                            out_means = out_main_means, out_stds = out_main_stds)
 
-        self.register_buffer("X_train_main")
-        self.register_buffer("Y_train_main")
+        self.register_buffer("X_train_main", None)
+        self.register_buffer("Y_train_main", None)
         self.X_train_aux = [None] * len(n_out_aux)
         self.Y_train_aux = [None] * len(n_out_aux)
         
@@ -327,11 +331,14 @@ class LayeredRegBNN(PyroModule):
         net = LayeredRegBNN(n_feat, n_out_main, n_out_aux, *args, **kwargs)
 
         # Set normalizers in nets
-        net.main.norm = PyroNormalizer.from_data(X_norm)
-        net.main.unnorm = PyroUnNormalizer.from_data(Y_train_main)
         for i in range(len(n_out_aux)):
             net.aux[i].norm = PyroNormalizer.from_data(X_norm)
             net.aux[i].unnorm = PyroUnNormalizer.from_data(Y_train_aux[i])
+        net.main.norm = PyroNormalizer(
+            means = torch.cat([net.aux[0].norm.means, *[net.aux[i].unnorm.means for i in range(len(n_out_aux))]]),
+            stds = torch.cat([net.aux[0].norm.stds, *[net.aux[i].unnorm.stds for i in range(len(n_out_aux))]])
+        )
+        net.main.unnorm = PyroUnNormalizer.from_data(Y_train_main)
         
         # Set internal training data buffers
         net.X_train_main = X_train_main
