@@ -19,9 +19,7 @@ from ..util import make_positive_definite
 __all__ = ["RegBNNGuide", "LayeredRegBNNGuide"]
 
 def make_positive_definite_flipped(A: torch.Tensor) -> torch.Tensor:
-    return make_positive_definite(
-        make_positive_definite(A.flip((-2, -1))).flip((-2, -1))
-    )
+    return make_positive_definite(make_positive_definite(A).flip((-2, -1))).flip((-2, -1))
 
 def _woodbury_inv(A_inv_diag: torch.Tensor, X: torch.Tensor, C_inv: torch.Tensor = None):
     """Inverts a matrix of the form M = (A + X^T * C * X), where A is diagonal,
@@ -297,7 +295,7 @@ class LayeredRegBNNGuide(PyroModule):
 
     def __init__(self, model: LayeredRegBNN):
         super().__init__()
-        self.aux = PyroModuleList()
+        self.aux = PyroModuleList([])
         for net in model.aux:
             self.aux.append(RegBNNGuide(net))
         self.main = RegBNNGuide(model.main)
