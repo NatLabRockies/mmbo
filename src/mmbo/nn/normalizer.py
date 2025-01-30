@@ -18,6 +18,7 @@ class _MeanStdTransform(nn.Module):
         super().__init__()
         self.register_buffer("means", means)
         self.register_buffer("stds", stds)
+        self.eps = 1e-5
     
     @classmethod
     def from_data(cls, X: torch.Tensor, ndim=1):
@@ -30,10 +31,10 @@ class _MeanStdTransform(nn.Module):
         return cls(means, stds)
     
     def norm(self, X: torch.Tensor) -> torch.Tensor:
-        return (X - self.means) / self.stds
+        return (X - self.means) / (self.stds + self.eps)
     
     def unnorm(self, Z: torch.Tensor) -> torch.Tensor:
-        return Z * self.stds + self.means
+        return Z * (self.stds + self.eps) + self.means
 
 class Normalizer(_MeanStdTransform):
     """Normalizes data by first subtracting the means and then dividing by
