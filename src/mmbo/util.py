@@ -34,9 +34,7 @@ def make_positive_definite(A: torch.Tensor) -> torch.Tensor:
         result = A.clone()
         # Only correct matrices where is_posdef is False
         A_sym = make_symmetric(A[is_posdef.logical_not()])
-        # Don't worry about gradients through the adding of the ridge, i.e.,
-        # "magically" find a constant that we're adding.
-        min_eigvals = torch.linalg.eigvals(A_sym.detach()).real.min(dim=-1).values
+        min_eigvals = torch.linalg.eigvals(A_sym).real.min(dim=-1).values
         to_add = (-min_eigvals).clamp(min=0) + eps
         ridge = to_add.unsqueeze(-1).expand((*to_add.shape, d)).diag_embed()
         result[is_posdef.logical_not()] = A_sym + ridge
