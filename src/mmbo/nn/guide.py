@@ -142,10 +142,13 @@ class RegBNNGuide(PyroModule):
         Y = Y.reshape((-1, Y.shape[-1]))
 
         nu = self.model.nu0 + X.shape[:-1].numel()
-        Lambda_inv = make_positive_definite_flipped(self.model.Lambda0_inv + X.mT @ X)
+        Lambda_inv = self.model.Lambda0_inv + X.mT @ X
         #Lambda = torch.linalg.inv(Lambda_inv)
         #Lambda_tril = torch.linalg.cholesky(Lambda)
-        Lambda_tril = _precision_to_scale_tril(Lambda_inv)
+        try:
+            Lambda_tril = _precision_to_scale_tril(Lambda_inv)
+        except torch.linalg.LinAlgError:
+            Lambda_tril = _precision_to_scale_tril(make_positive_definite_flipped(Lambda_inv))
         #B = Lambda_tril @ Lambda_tril.mT @ X.mT @ Y # Is this better?
         #B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y]) # Is this better?
         #B = torch.linalg.solve(Lambda_inv, X.mT @ Y)
@@ -153,7 +156,10 @@ class RegBNNGuide(PyroModule):
         SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
         Prior_dist = B.mT @ self.model.Lambda0_inv @ B
         #V_tril = torch.linalg.cholesky(torch.linalg.inv(self.model.V0_inv + SSE_dist + Prior_dist))
-        V_tril = _precision_to_scale_tril(make_positive_definite_flipped(self.model.V0_inv + SSE_dist + Prior_dist))
+        try:
+            V_tril = _precision_to_scale_tril(self.model.V0_inv + SSE_dist + Prior_dist)
+        except torch.linalg.LinAlgError:
+            V_tril = _precision_to_scale_tril(make_positive_definite_flipped(self.model.V0_inv + SSE_dist + Prior_dist))
         return {
             "nu": nu,
             "Lambda_tril": Lambda_tril,
@@ -181,17 +187,21 @@ class RegBNNGuide(PyroModule):
         b0 = self.model.V0_inv[j,j] / 2
         Lambda0_inv = self.model.Lambda0_inv
         # Posterior parameters
-        Lambda_inv = make_positive_definite_flipped(Lambda0_inv + X_obs.mT @ X_obs)
+        Lambda_inv = Lambda0_inv + X_obs.mT @ X_obs
         mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
         a = a0 + n_obs / 2
         b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
         # Compile into posterior predictive and return
         Sigma = (b / a) * (torch.eye(n_miss, dtype=X_miss.dtype, device=X_miss.device) + 
                            X_miss @ torch.linalg.solve(Lambda_inv, X_miss.mT))
+        try:
+            Sigma_tril = torch.linalg.cholesky(Sigma)
+        except torch.linalg.LinAlgError:
+            Sigma_tril = torch.linalg.cholesky(make_positive_definite_flipped(Sigma))
         return {
             "df": 2 * a,
             "mu": (X_miss @ mu).squeeze(-1),
-            "Sigma_tril": torch.linalg.cholesky(make_positive_definite_flipped(Sigma))
+            "Sigma_tril": Sigma_tril
         }
     
     def forward(self, *, 
