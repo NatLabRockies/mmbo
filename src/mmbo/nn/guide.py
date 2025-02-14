@@ -18,8 +18,59 @@ from ..util import make_positive_definite
 
 __all__ = ["RegBNNGuide", "LayeredRegBNNGuide"]
 
-def make_positive_definite_flipped(A: torch.Tensor) -> torch.Tensor:
-    return make_positive_definite(make_positive_definite(A).flip((-2, -1))).flip((-2, -1))
+def make_positive_definite_flipped(A: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    return make_positive_definite(A.flip((-2, -1)), *args, **kwargs).flip((-2, -1))
+
+def cholesky_with_retry(A: torch.Tensor, tries: int = 100) -> torch.Tensor:
+    result = None
+    cnt = 0
+    while (result is None) and (cnt < tries):
+        cnt += 1
+        try:
+            result = torch.linalg.cholesky(A)
+        except torch.linalg.LinAlgError as e:
+            if cnt == tries:
+                raise Exception("Positive definite correction tries exceeded.")
+            result = None
+            A_new = make_positive_definite(A)
+            if (A == A_new).all():
+                raise Exception("Positive definite correction failed to change matrix.")
+            A = A_new
+    return result
+
+def p2st_with_retry(A: torch.Tensor, tries: int = 100) -> torch.Tensor:
+    result = None
+    cnt = 0
+    while (result is None) and (cnt < tries):
+        cnt += 1
+        try:
+            result = _precision_to_scale_tril(A)
+        except torch.linalg.LinAlgError as e:
+            if cnt == tries:
+                raise Exception("Positive definite correction tries exceeded.")
+            result = None
+            A_new = make_positive_definite_flipped(A)
+            if (A == A_new).all():
+                raise Exception("Positive definite correction failed to change matrix.")
+            A = A_new
+    return result
+
+def pd_inv_with_retry(A: torch.Tensor, tries: int = 100) -> torch.Tensor:
+    result = None
+    cnt = 0
+    while (result is None) and (cnt < tries):
+        cnt += 1
+        try:
+            result = torch.linalg.inv(A)
+        except torch.linalg.LinAlgError as e:
+            if cnt == tries:
+                raise Exception("Positive definite correction tries exceeded.")
+            result = None
+            A_new = make_positive_definite(A)
+            if (A == A_new).all():
+                raise Exception("Positive definite correction failed to change matrix.")
+            A = A_new
+    return result
 
 def _woodbury_inv(A_inv_diag: torch.Tensor, X: torch.Tensor, C_inv: torch.Tensor = None):
     """Inverts a matrix of the form M = (A + X^T * C * X), where A is diagonal,
@@ -145,10 +196,7 @@ class RegBNNGuide(PyroModule):
         Lambda_inv = self.model.Lambda0_inv + X.mT @ X
         #Lambda = torch.linalg.inv(Lambda_inv)
         #Lambda_tril = torch.linalg.cholesky(Lambda)
-        try:
-            Lambda_tril = _precision_to_scale_tril(Lambda_inv)
-        except torch.linalg.LinAlgError:
-            Lambda_tril = _precision_to_scale_tril(make_positive_definite_flipped(Lambda_inv))
+        Lambda_tril = p2st_with_retry(Lambda_inv)
         #B = Lambda_tril @ Lambda_tril.mT @ X.mT @ Y # Is this better?
         #B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y]) # Is this better?
         #B = torch.linalg.solve(Lambda_inv, X.mT @ Y)
@@ -156,10 +204,7 @@ class RegBNNGuide(PyroModule):
         SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
         Prior_dist = B.mT @ self.model.Lambda0_inv @ B
         #V_tril = torch.linalg.cholesky(torch.linalg.inv(self.model.V0_inv + SSE_dist + Prior_dist))
-        try:
-            V_tril = _precision_to_scale_tril(self.model.V0_inv + SSE_dist + Prior_dist)
-        except torch.linalg.LinAlgError:
-            V_tril = _precision_to_scale_tril(make_positive_definite_flipped(self.model.V0_inv + SSE_dist + Prior_dist))
+        V_tril = p2st_with_retry(self.model.V0_inv + SSE_dist + Prior_dist)
         return {
             "nu": nu,
             "Lambda_tril": Lambda_tril,
@@ -188,16 +233,16 @@ class RegBNNGuide(PyroModule):
         Lambda0_inv = self.model.Lambda0_inv
         # Posterior parameters
         Lambda_inv = Lambda0_inv + X_obs.mT @ X_obs
-        mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
+        Lambda = pd_inv_with_retry(Lambda_inv)
+        #mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
+        mu = Lambda @ X_obs.mT @ y_obs
         a = a0 + n_obs / 2
-        b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
+        #b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
+        b = b0 + (y_obs.mT @ (torch.eye(n_obs, dtype=X_miss.dtype, device=X_miss.device) - X_obs @ Lambda @ X_obs.mT) @ y_obs).squeeze().clamp(min = -1.99 * b0) / 2
         # Compile into posterior predictive and return
         Sigma = (b / a) * (torch.eye(n_miss, dtype=X_miss.dtype, device=X_miss.device) + 
-                           X_miss @ torch.linalg.solve(Lambda_inv, X_miss.mT))
-        try:
-            Sigma_tril = torch.linalg.cholesky(Sigma)
-        except torch.linalg.LinAlgError:
-            Sigma_tril = torch.linalg.cholesky(make_positive_definite_flipped(Sigma))
+                           X_miss @ Lambda @ X_miss.mT)
+        Sigma_tril = cholesky_with_retry(Sigma)
         return {
             "df": 2 * a,
             "mu": (X_miss @ mu).squeeze(-1),
@@ -314,6 +359,29 @@ class LayeredRegBNNGuide(PyroModule):
     @property
     def model(self):
         return self._model[0]
+
+    def expose_main(self):
+        prefix = 'main'
+        def expose(msg):
+            if (msg['type'] == 'sample'):
+                return True
+            elif (msg['name'] is not None) and msg['name'].startswith(prefix):
+                return True
+            else:
+                return False
+        return pyro.poutine.block(self, expose_fn = expose)
+    
+    def expose_aux(self, num=None):
+        sample_prefix = 'aux' if num is None else f'aux_{num}'
+        param_prefix = 'aux' if num is None else f'aux.{num}'
+        def expose(msg):
+            if (msg['type'] == 'param') and msg['name'].startswith(param_prefix):
+                return True
+            elif (msg['type'] == 'sample') and msg['name'].startswith(sample_prefix):
+                return True
+            else:
+                return False
+        return pyro.poutine.block(self, expose_fn = expose)
 
     def forward(self, *, 
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
