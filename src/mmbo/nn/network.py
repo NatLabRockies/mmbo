@@ -354,6 +354,26 @@ class LayeredRegBNN(PyroModule):
     
     def no_missing(self):
         return functools.partial(self, sample_missing = False)
+    
+    def expose_main(self):
+        prefix = 'main'
+        def expose(msg):
+            if (msg['type'] == 'sample'):
+                return True
+            elif (msg['name'] is not None) and msg['name'].startswith(prefix):
+                return True
+            else:
+                return False
+        return pyro.poutine.block(self, expose_fn = expose)
+    
+    def expose_aux(self, num=None):
+        prefix = 'aux' if num is None else f'aux_{num}'
+        def expose(msg):
+            if (msg['name'] is not None) and msg['name'].startswith(prefix):
+                return True
+            else:
+                return False
+        return pyro.poutine.block(self, expose_fn = expose)
 
     def forward(self, *, 
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
