@@ -18,6 +18,7 @@ dependencies = [
 	"scikit-learn",
 	"scipy",
 	"torch",
+	"torch_pca"
 ]
 authors = [
 	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
