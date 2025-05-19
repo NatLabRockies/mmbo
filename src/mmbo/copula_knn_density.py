@@ -12,7 +12,8 @@ class CopulaKNNDensity():
         nsamples, nfeatures = data.shape
         if k is None:
             # (Approximately) optimal k, see Blumentritt and Schmid 2012, Hall 1983
-            k = round(k_adjust * nsamples ** (4 / (nfeatures + 4)))
+            # Bound below by 2, making density finite at observed locations
+            k = max(2, round(k_adjust * nsamples ** (4 / (nfeatures + 4))))
         self._neighbors = neighbors.NearestNeighbors(n_neighbors = k, metric="chebyshev", **kwargs)
         self._neighbors.fit(data)
     
