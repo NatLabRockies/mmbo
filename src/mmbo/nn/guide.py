@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 from pyro.nn import PyroModule, PyroSample, PyroParam, PyroModuleList
 import pyro.distributions as dist
@@ -11,12 +11,13 @@ import torch
 from torch import nn
 from torch.nn.functional import linear, tanh, relu, elu, softplus, gelu, leaky_relu
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
+from pyro.infer import Predictive
 
 from .network import RegBNN, LayeredRegBNN, _vector_pack, _vector_unpack
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 from ..util import make_positive_definite
 
-__all__ = ["RegBNNGuide", "LayeredRegBNNGuide"]
+__all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples"]
 
 def make_positive_definite_flipped(A: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     return make_positive_definite(A.flip((-2, -1)), *args, **kwargs).flip((-2, -1))
@@ -429,3 +430,11 @@ class LayeredRegBNNGuide(PyroModule):
             out_main = self.main(X_train = X_train_main_full, Y_train = Y_train_main, X_pred = X_pred_full)
         
         return out_main
+
+
+def posterior_samples(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, num_samples, *args, **kwargs):
+    """Take a fitted guide and produce samples from it."""
+    with pyro.get_param_store().scope(params):
+        guide.eval()
+        pred = Predictive(guide.model, guide = guide, num_samples = num_samples)
+        return pred.get_samples(*args, **kwargs)
