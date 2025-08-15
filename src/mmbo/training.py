@@ -15,7 +15,7 @@ def do_svi(svi, *args, check_interval=1000, max_nonimproved = 3, params = None, 
         with pyro.get_param_store().scope() as params:
             pass
     best_params = copy.deepcopy(params)
-    print("{} - Start".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    print("{} - Start".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     while nonimproved < max_nonimproved:
         with pyro.get_param_store().scope(params):
             loss = svi.step(*args, **kwargs)
@@ -34,4 +34,5 @@ def do_svi(svi, *args, check_interval=1000, max_nonimproved = 3, params = None, 
                 nonimproved += 1
             else:
                 nonimproved = 0
+            print("{} - Step {}, Elbo loss: {:.1f} +/- {:.1f} (slope = {:.3f} +/- {:.3f} loss/k-iter, p-value = {:.3f}){} {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), len(losses), current_loss, 2 * current_loss_std, 1000*reg.slope, 1000*2*reg.stderr, reg.pvalue, ' +'*params_updated, '*'*nonimproved))
     return best_params, losses
