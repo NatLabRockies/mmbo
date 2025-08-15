@@ -437,4 +437,5 @@ def posterior_samples(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, num
     with pyro.get_param_store().scope(params):
         guide.eval()
         pred = Predictive(guide.model, guide = guide, num_samples = num_samples)
-        return pred.get_samples(*args, **kwargs)
+        samples = pred.get_samples(*args, **kwargs)
+        return {n:samples[n].squeeze(1) for n in samples.keys() if not n.endswith("_pred")}
