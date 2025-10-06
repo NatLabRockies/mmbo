@@ -36,6 +36,12 @@ def _gen_Lambda0_inv(width, prior_variance):
     mat *= prior_variance
     return mat
 
+"""A batched version of torch.nn.functional.linear using unsqueeze,
+matrix multiply, and squeeze. Allows for batched weights/biases, e.g.,
+for posterior samples."""
+def _batch_linear(X: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor):
+    return (X.unsqueeze(-2) @ weight.mT).squeeze(-2) + bias
+
 class BNNLinearLayer(PyroModule):
 
     def __init__(self, insize: int, outsize: int, *, weight_scale = 1.0, bias_scale = 1.0):
@@ -57,9 +63,15 @@ class BNNLinearLayer(PyroModule):
         self.bW = PyroSample(lambda self: dist.Normal(self.loc, self.scale).to_event(2))
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        bias = self.bW[:,0]
-        weight = self.bW[:,1:]
-        return linear(X, self.k * weight, bias)
+        if self.training:
+            bias = self.bW[:,0]
+            weight = self.bW[:,1:]
+            return linear(X, self.k * weight, bias)
+        else:
+            # Can this be done all the time?
+            bias = self.bW[...,0]
+            weight = self.bW[...,1:]
+            return _batch_linear(X, self.k * weight, bias)
 
 class BNNActivationLayer(PyroModule):
     
@@ -80,7 +92,11 @@ class BNNActivationLayer(PyroModule):
         self.scale = PyroSample(lambda self: dist.Gamma(self.scale_concentration, self.scale_rate))
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        return self.func(self.scale * X)
+        if self.training:
+            return self.func(self.scale * X)
+        else:
+            # Can this be done all the time?
+            return self.func(self.scale.unsqueeze(-1) * X)
 
 class RegBNN(PyroModule):
     """Bayesian Neural Network for Regression class.
@@ -217,6 +233,10 @@ class RegBNN(PyroModule):
 
         # Weights and biases with conjugate Matrix Normal prior distribution
         h_last = self.hidden_widths[-1]
+        if self.training:
+            ll_linear = linear
+        else:
+            ll_linear = _batch_linear
         with scope(prefix = "last"):
             bW = pyro.sample(
                 "bW", 
@@ -227,10 +247,10 @@ class RegBNN(PyroModule):
             weight = pyro.deterministic("weight", bW[:,1:])
             bias = pyro.deterministic("bias", bW[:,0])
             with data_plate():
-                activation = pyro.deterministic("activation", linear(activation, weight / math.sqrt(h_last), bias), event_dim = 1)
+                activation = pyro.deterministic("activation", ll_linear(activation, weight / math.sqrt(h_last), bias), event_dim = 1)
             if do_pred:
                 with pred_plate():
-                    activation_pred = pyro.deterministic("activation_pred", linear(activation_pred, weight / math.sqrt(h_last), bias), event_dim = 1)
+                    activation_pred = pyro.deterministic("activation_pred", ll_linear(activation_pred, weight / math.sqrt(h_last), bias), event_dim = 1)
         
         # Output mean and observation
         mu_normed = activation
