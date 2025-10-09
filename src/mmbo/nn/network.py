@@ -16,7 +16,7 @@ from pyro.infer import Predictive
 from .normalizer import PyroNormalizer, PyroUnNormalizer
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 
-__all__ = ["RegBNN", "LayeredRegBNN", "predictor"]
+__all__ = ["RegBNN", "LayeredRegBNN", "predictor", "predictor_batch"]
 
 def _gen_Lambda0_tril(width, prior_variance):
         mat = torch.eye(width+1) / math.sqrt(width)
@@ -280,18 +280,17 @@ class RegBNN(PyroModule):
 def _vector_pack(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
     """Packs an iterable of tensors, each representing a batch of vectors of
     equal dimension, into one 2d tensor with the same length last dimension."""
-    return torch.cat([t.reshape(-1, t.shape[-1]) for t in tensors], dim=0)
+    assert all(t.ndim >= 2 for t in tensors)
+    return torch.cat(tensors, dim=-2)
 
-def _vector_unpack(tensor: torch.Tensor, batch_shapes: Sequence[torch.Size]) -> Sequence[torch.Tensor]:
+def _vector_unpack(tensor: torch.Tensor, batch_shapes: Sequence[int]) -> Sequence[torch.Tensor]:
     """Undoes the operation of _vector_pack, by unpacking the first dimension
     of the 2d input tensor into one tensor per element in the iterable
     batch_shapes. Each resulting tensor will have leading dimensions according
     to the values in batch_shapes, and final dimension equal to the last dimension
     of the input tensor."""
-    assert tensor.ndim == 2
-    vecdim = tensor.shape[-1]
-    splits = torch.split(tensor, [s.numel() for s in batch_shapes], dim=0)
-    return tuple(t.reshape(*s, vecdim) for t,s in zip(splits, batch_shapes))
+    assert tensor.ndim >= 2, f"Shape is {tensor.shape}"
+    return torch.split(tensor, batch_shapes, dim=-2)
 
 
 class LayeredRegBNN(PyroModule):
@@ -424,14 +423,20 @@ class LayeredRegBNN(PyroModule):
             with scope(prefix = f"aux_{i}"):
                 aux_out = self.aux[i](X_train = X_train_aux[i], Y_train = Y_train_aux[i], X_pred = X_aux_pred, sample_missing = sample_missing)
             if do_pred:
-                aux_out_train[i], aux_out_pred[i] = _vector_unpack(aux_out, (X_train_main.shape[:-1], X_pred.shape[:-1]))
+                aux_out_train[i], aux_out_pred[i] = _vector_unpack(aux_out, (X_train_main.shape[-2], X_pred.shape[-2]))
             else:
                 aux_out_train[i] = aux_out
         
         # Main network
-        X_train_main_full = torch.cat([X_train_main, *aux_out_train], dim = -1)
+        aux_out_train_cat = torch.cat(aux_out_train, dim=-1) # Need same shape as X_train_main except last dimension
+        if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
+            X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
+        X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
         if do_pred:
-            X_pred_full = torch.cat([X_pred, *aux_out_pred], dim = -1)
+            aux_out_pred_cat = torch.cat(aux_out_pred, dim=-1) # Needs same shape as X_pred except last dimension
+            if X_pred.shape[:-1] != aux_out_pred_cat.shape[:-1]:
+                X_pred = X_pred.unsqueeze(0).expand(*aux_out_pred_cat.shape[:-1], -1)
+            X_pred_full = torch.cat([X_pred, aux_out_pred_cat], dim = -1)
         else:
             X_pred_full = None
         with scope(prefix = "main"):
@@ -451,4 +456,14 @@ def predictor(model, posterior_samples):
             [conditioned_model(i)(X_pred = X_test).unsqueeze(0) for i in range(numsamples)],
             dim = 0
         )
+    return f
+
+def predictor_batch(model, posterior_samples):
+    """A predictor wrapper that functions by batched matrix operations, not looping over posterior samples.
+    Requires the model to be in eval mode, using the batched linear layers, etc."""
+    expanded_samples = {n:posterior_samples[n].unsqueeze(1) for n in posterior_samples}
+    def f(X_test: torch.Tensor):
+        assert X_test.ndim == 2
+        with pyro.poutine.condition(data = expanded_samples):
+            return model(X_pred = X_test)
     return f
