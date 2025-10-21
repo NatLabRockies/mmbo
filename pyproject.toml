@@ -12,6 +12,7 @@ include-package-data = true
 name = "mmbo"
 version = "0.0.1"
 dependencies = [
+	"botorch",
 	"numpy",
 	"pandas",
 	"pyro-ppl",
