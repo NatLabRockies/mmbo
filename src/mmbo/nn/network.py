@@ -98,6 +98,100 @@ class BNNActivationLayer(PyroModule):
             # Can this be done all the time?
             return self.func(self.scale.unsqueeze(-1) * X)
 
+class _BaseBNN(PyroModule):
+    def __init__(self, n_feat, n_out, hidden_widths, activation="relu",
+                 feature_means = None, feature_stds = None,
+                 out_means = None, out_stds = None,
+                 prior_variance = 0.01):
+        super().__init__()
+        
+        if hidden_widths is None:
+            hidden_widths = [2 * max(n_feat, n_out)]
+        self.n_feat = n_feat
+        self.n_out = n_out
+        self.hidden_widths = hidden_widths
+        self.prior_variance = prior_variance
+        self.activation = activation
+
+        self.norm = PyroNormalizer(feature_means, feature_stds)
+        self.unnorm = PyroUnNormalizer(out_means, out_stds)
+
+        self.layers = PyroModuleList([])
+        insize = n_feat
+        for outsize in hidden_widths:
+            self.layers.append(
+                PyroModule[torch.nn.Sequential](
+                    BNNLinearLayer(insize, outsize),
+                    BNNActivationLayer(activation)
+                )    
+            )
+            insize = outsize
+        
+        # Last Layer Priors
+        # precision ~ Wishart(V0, nu0)
+        # V0_inv = V0^(-1), V0_tril = chol(V0)
+        # bW|precision ~ MatrixNormal(0, precision^(-1), Lambda0)
+        # Lambda0_inv = Lambda0^(-1), Lambda0_tril = chol(Lambda0)
+        self.register_buffer("nu0", torch.as_tensor(self.n_out + 5))
+        self.register_buffer("V0_tril", torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance))
+        self.register_buffer("V0", torch.eye(self.n_out) / (4 * self.prior_variance))
+        self.register_buffer("V0_inv", torch.eye(self.n_out) * (4 * self.prior_variance))
+        h_last = self.hidden_widths[-1]
+        self.register_buffer("Lambda0_tril", torch.eye(h_last + 1) / math.sqrt(self.prior_variance))
+        self.register_buffer("Lambda0", torch.eye(h_last + 1) / self.prior_variance)
+        self.register_buffer("Lambda0_inv", torch.eye(h_last + 1) * self.prior_variance)
+        self.register_buffer("last_bW_mean", torch.zeros((self.n_out, h_last + 1)))
+
+        self.precision = PyroSample(dist.Wishart(self.nu0, scale_tril = self.V0_tril, validate_args = False))
+        self.last_bW = PyroSample(lambda self:
+                MatrixNormal(self.last_bW_mean, 
+                             row_scale_tril = _precision_to_scale_tril(self.precision), 
+                             col_scale_tril = self.Lambda0_tril)
+            )
+        
+    def forward(self, X: torch.Tensor, Y: Optional[torch.Tensor] = None, label: str = "train", sample_missing: bool = True):
+        
+        X_normed = self.norm.norm(X)
+        Y_normed = self.norm.norm(Y) if Y is not None else None
+
+        def data_plate():
+            return pyro.plate_stack("data", X_normed.shape[:-1], rightmost_dim=-1)
+
+        # Hidden layers
+        activation = X_normed
+        for idx, layer in enumerate(self.layers):
+            activation = layer(activation)
+            with scope(prefix=label):
+                with data_plate():
+                    pyro.deterministic(f"activation_{idx+1}", activation, event_dim=1)
+        
+        # Last layer
+        h_last = self.hidden_widths[-1]
+        if self.training:
+            ll_linear = linear
+        else:
+            ll_linear = _batch_linear
+        weight = self.last_bW[:,1:]
+        bias = self.last_bW[:,1:]
+        precision = self.precision
+        with scope(prefix = label):
+            with data_plate():
+                activation = pyro.deterministic("activation_last", ll_linear(activation, weight / math.sqrt(h_last), bias), event_dim = 1)
+                mu_normed = activation
+                mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
+                obs_normed = pyro.sample(
+                    "obs_normed", 
+                    dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
+                    obs = Y_normed
+                )
+                if sample_missing:
+                    pyro.sample(
+                        "Y_normed_full", 
+                        ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
+                    )
+        
+        return mu
+
 class RegBNN(PyroModule):
     """Bayesian Neural Network for Regression class.
     
