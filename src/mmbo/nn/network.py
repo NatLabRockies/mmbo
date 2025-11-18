@@ -13,7 +13,7 @@ import pyro.poutine as poutine
 from pyro.contrib.autoname import scope
 from pyro.infer import Predictive
 
-from .normalizer import PyroNormalizer, PyroUnNormalizer
+from .normalizer import PyroNormalizer, PyroUnNormalizer, mean_std
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 
 __all__ = ["RegBNN", "LayeredRegBNN", "predictor", "predictor_batch"]
@@ -104,7 +104,7 @@ class _BaseBNN(PyroModule):
                  out_means = None, out_stds = None,
                  prior_variance = 0.01):
         super().__init__()
-        
+
         if hidden_widths is None:
             hidden_widths = [2 * max(n_feat, n_out)]
         self.n_feat = n_feat
@@ -214,49 +214,12 @@ class RegBNN(PyroModule):
                  prior_variance = 0.01):
         
         super().__init__()
-        
-        if hidden_widths is None:
-            hidden_widths = [2 * max(n_feat, n_out)]
-        
-        self.n_feat = n_feat
-        self.n_out = n_out
-        self.hidden_widths = hidden_widths
-        self.prior_variance = prior_variance
-        self.activation = activation
+        # The constituient base BNN. Contains all the single forward pass logic.
+        self.net = _BaseBNN(n_feat, n_out, hidden_widths, activation = activation,
+                            feature_means = feature_means, feature_stds = feature_stds,
+                            out_means = out_means, out_stds = out_stds,
+                            prior_variance = prior_variance)
 
-        # Training data, if supplied
-        self.register_buffer("X_train", None)
-        self.register_buffer("Y_train", None)
-
-        # Create normalizers
-        self.norm = PyroNormalizer(feature_means, feature_stds)
-        self.unnorm = PyroUnNormalizer(out_means, out_stds)
-
-        # Construct hidden layers
-        self.layers = PyroModuleList([])
-        insize = n_feat
-        for outsize in hidden_widths:
-            self.layers.append(
-                PyroModule[torch.nn.Sequential](
-                    BNNLinearLayer(insize, outsize),
-                    BNNActivationLayer(activation)
-                )    
-            )
-            insize = outsize
-
-        # Last Layer Priors
-        # precision ~ Wishart(V0, nu0)
-        # V0_inv = V0^(-1), V0_tril = chol(V0)
-        # bW|precision ~ MatrixNormal(0, precision^(-1), Lambda0)
-        # Lambda0_inv = Lambda0^(-1), Lambda0_tril = chol(Lambda0)
-        self.register_buffer("nu0", torch.as_tensor(self.n_out + 5))
-        self.register_buffer("V0_tril", torch.eye(self.n_out) / math.sqrt(4 * self.prior_variance))
-        self.register_buffer("V0", torch.eye(self.n_out) / (4 * self.prior_variance))
-        self.register_buffer("V0_inv", torch.eye(self.n_out) * (4 * self.prior_variance))
-        h_last = self.hidden_widths[-1]
-        self.register_buffer("Lambda0_tril", torch.eye(h_last + 1) / math.sqrt(self.prior_variance))
-        self.register_buffer("Lambda0", torch.eye(h_last + 1) / self.prior_variance)
-        self.register_buffer("Lambda0_inv", torch.eye(h_last + 1) * self.prior_variance)
 
     @staticmethod
     def from_data(X_train: torch.Tensor, Y_train: torch.Tensor, *args, **kwargs):
@@ -265,110 +228,30 @@ class RegBNN(PyroModule):
         tensors X_train and Y_train"""
         n_feat = X_train.shape[-1]
         n_out = Y_train.shape[-1]
-        model = RegBNN(n_feat, n_out, *args, **kwargs)
-        model.norm = PyroNormalizer.from_data(X_train)
-        model.unnorm = PyroUnNormalizer.from_data(Y_train)
-        model.X_train = X_train
-        model.Y_train = Y_train
+        X_mean,X_std = mean_std(X_train)
+        Y_mean,Y_std = mean_std(Y_train)
+        model = RegBNN(n_feat, n_out, *args,
+                       feature_means = X_mean, feature_stds = X_std,
+                       out_means = Y_mean, out_stds = Y_std,
+                       **kwargs)
         return model
-
-    def no_missing(self):
-        return functools.partial(self, sample_missing = False)
 
     def forward(self, *, 
                 X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
-                X_pred: torch.Tensor = None, sample_missing: bool = True):
-        # Fill in training data
-        X_train = X_train if X_train is not None else self.X_train
-        if X_train is None:
-            raise ValueError("Must supply X_train")
-        Y_train = Y_train if Y_train is not None else self.Y_train
-        if Y_train is None:
-            raise ValueError("Must supply Y_train")
-
-        do_pred = (X_pred is not None)
-
-        # Normalize data to have mean zero and variance one
-        X_normed = self.norm.norm(X_train)
-        Y_normed = self.unnorm.norm(Y_train)
-        if do_pred:
-            X_normed_pred = self.norm.norm(X_pred)
-
-        # Plates to reuse throughout
-        def data_plate():
-            return pyro.plate_stack("data", X_normed.shape[:-1], rightmost_dim=-1)
-        def pred_plate():
-            return pyro.plate_stack("preds", X_normed_pred.shape[:-1], rightmost_dim=-1)
-
-        # Pass through layers
-        activation = X_normed
-        if do_pred:
-            activation_pred = X_normed_pred
-        for idx,layer in enumerate(self.layers):
-            activation = layer(activation)
-            if do_pred:
-                activation_pred = layer(activation_pred)
-            with scope(prefix = f"layer{idx+1}"):
-                with data_plate():
-                    pyro.deterministic("activation", activation, event_dim = 1)
-                if do_pred:
-                    with pred_plate():
-                        pyro.deterministic("activation_pred", activation_pred, event_dim = 1)
+                X_pred: torch.Tensor = None):
         
-        # Last layer
-
-        # Output multivariate normal precision matrix
-        # Diagonal elements of the covariance matrix (inverse of the precision 
-        # matrix) have both prior mean and prior sd of self.prior_variance
-        precision = pyro.sample(
-            "precision", 
-            dist.Wishart(self.nu0, scale_tril = self.V0_tril, validate_args = False)
-        )
-
-        # Weights and biases with conjugate Matrix Normal prior distribution
-        h_last = self.hidden_widths[-1]
-        if self.training:
-            ll_linear = linear
+        # Feed the training data through first (if present)
+        if X_train is not None:
+            mu = self.net(X_train, Y_train, label="train")
         else:
-            ll_linear = _batch_linear
-        with scope(prefix = "last"):
-            bW = pyro.sample(
-                "bW", 
-                MatrixNormal(torch.zeros((self.n_out, h_last + 1)), 
-                             row_scale_tril = _precision_to_scale_tril(precision), 
-                             col_scale_tril = self.Lambda0_tril)
-            )
-            weight = pyro.deterministic("weight", bW[:,1:])
-            bias = pyro.deterministic("bias", bW[:,0])
-            with data_plate():
-                activation = pyro.deterministic("activation", ll_linear(activation, weight / math.sqrt(h_last), bias), event_dim = 1)
-            if do_pred:
-                with pred_plate():
-                    activation_pred = pyro.deterministic("activation_pred", ll_linear(activation_pred, weight / math.sqrt(h_last), bias), event_dim = 1)
-        
-        # Output mean and observation
-        mu_normed = activation
-        if do_pred:
-            mu_normed_pred = activation_pred
-        with data_plate():
-            mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
-            obs_normed = pyro.sample(
-                "obs_normed", 
-                dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
-                obs = Y_normed
-            )
-        if do_pred:
-            with pred_plate():
-                mu_pred = pyro.deterministic("mu_pred", self.unnorm(mu_normed_pred), event_dim = 1)
-        # If Y_normed is None: obs_normed is sampled, Y_normed_full is fully conditioned (Delta distribution)
-        # If Y_normed is not None: obs_normed is a matrix with some nans, as expected for ConditionalMultivariateNormal
-        if sample_missing:
-            pyro.sample(
-                "Y_normed_full", 
-                ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
-            )
-        
-        return mu_pred if do_pred else mu
+            mu = None
+        # Feed the prediction data through second (if present)
+        if X_pred is not None:
+            mu_pred = self.net(X_pred, label="pred")
+        else:
+            mu_pred = None
+
+        return mu_pred if mu_pred is not None else mu
 
 
 def _vector_pack(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
@@ -408,7 +291,7 @@ class LayeredRegBNN(PyroModule):
         self.aux = PyroModuleList([])
         for out, means, stds in zip(n_out_aux, out_aux_means, out_aux_stds):
             self.aux.append(
-                RegBNN(n_feat, out, *args,
+                _BaseBNN(n_feat, out, *args,
                        feature_means = feature_means, feature_stds = feature_stds,
                        out_means = means, out_stds = stds, **kwargs)
             )
@@ -424,14 +307,9 @@ class LayeredRegBNN(PyroModule):
             feature_main_stds = torch.cat((feature_stds, *out_aux_stds), dim = -1)
         
         # Main network
-        self.main = RegBNN(n_feat + sum(n_out_aux), n_out_main, *args,
+        self.main = _BaseBNN(n_feat + sum(n_out_aux), n_out_main, *args,
                            feature_means = feature_main_means, feature_stds = feature_main_stds,
                            out_means = out_main_means, out_stds = out_main_stds)
-
-        self.register_buffer("X_train_main", None)
-        self.register_buffer("Y_train_main", None)
-        self.X_train_aux = [None] * len(n_out_aux)
-        self.Y_train_aux = [None] * len(n_out_aux)
         
     @staticmethod
     def from_data(X_train_main: torch.Tensor, Y_train_main: torch.Tensor,
@@ -441,104 +319,58 @@ class LayeredRegBNN(PyroModule):
         n_feat = X_norm.shape[-1]
         n_out_main = Y_train_main.shape[-1]
         n_out_aux = [y.shape[-1] for y in Y_train_aux]
-
-        net = LayeredRegBNN(n_feat, n_out_main, n_out_aux, *args, **kwargs)
-
-        # Set normalizers in nets
-        for i in range(len(n_out_aux)):
-            net.aux[i].norm = PyroNormalizer.from_data(X_norm)
-            net.aux[i].unnorm = PyroUnNormalizer.from_data(Y_train_aux[i])
-        net.main.norm = PyroNormalizer(
-            means = torch.cat([net.aux[0].norm.means, *[net.aux[i].unnorm.means for i in range(len(n_out_aux))]]),
-            stds = torch.cat([net.aux[0].norm.stds, *[net.aux[i].unnorm.stds for i in range(len(n_out_aux))]])
-        )
-        net.main.unnorm = PyroUnNormalizer.from_data(Y_train_main)
         
-        # Set internal training data buffers
-        net.X_train_main = X_train_main
-        net.Y_train_main = Y_train_main
-        for i in range(len(n_out_aux)):
-            # Hack to register a bunch of buffers because there's no such thing as a buffer list (yet)
-            net.register_buffer(f"X_train_aux_{i}", X_train_aux[i])
-            net.register_buffer(f"Y_train_aux_{i}", Y_train_aux[i])
-            net.X_train_aux[i] = net.__getattr__(f"X_train_aux_{i}")
-            net.Y_train_aux[i] = net.__getattr__(f"Y_train_aux_{i}")
+        X_mean,X_std = mean_std(X_norm)
+        Y_main_mean,Y_main_std = mean_std(Y_train_main)
+        Y_aux_mean,Y_aux_std = list(zip(*(mean_std(y) for y in Y_train_aux)))
+
+        net = LayeredRegBNN(n_feat, n_out_main, n_out_aux, *args,   
+                            feature_means = X_mean, feature_stds = X_std,
+                            out_main_means = Y_main_mean, out_main_stds = Y_main_std,
+                            out_aux_means = Y_aux_mean, out_aux_stds = Y_aux_std,
+                            **kwargs)
         
         return net
-    
-    def no_missing(self):
-        return functools.partial(self, sample_missing = False)
-    
-    def expose_main(self):
-        prefix = 'main'
-        def expose(msg):
-            if (msg['type'] == 'sample'):
-                return True
-            elif (msg['name'] is not None) and msg['name'].startswith(prefix):
-                return True
-            else:
-                return False
-        return pyro.poutine.block(self, expose_fn = expose)
-    
-    def expose_aux(self, num=None):
-        prefix = 'aux' if num is None else f'aux_{num}'
-        def expose(msg):
-            if (msg['name'] is not None) and msg['name'].startswith(prefix):
-                return True
-            else:
-                return False
-        return pyro.poutine.block(self, expose_fn = expose)
 
     def forward(self, *, 
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
                 X_train_aux: Optional[Sequence[torch.Tensor]] = None, Y_train_aux: Optional[Sequence[torch.Tensor]] = None, 
                 X_pred: Optional[torch.Tensor] = None, sample_missing: bool = True):
-        # Fill in training data from internal buffers if not provided
-        if X_train_main is None:
-            X_train_main = self.X_train_main
-        if Y_train_main is None:
-            Y_train_main = self.Y_train_main
-        if X_train_aux is None:
-            X_train_aux = self.X_train_aux
-        if Y_train_aux is None:
-            Y_train_aux = self.Y_train_aux
-
-        do_pred = (X_pred is not None)
-
-        # Auxiliary networks
-        aux_out_train = [None] * len(self.aux)
-        if do_pred:
-            aux_out_pred = [None] * len(self.aux)
-        for i in range(len(self.aux)):
-            if do_pred:
-                X_aux_pred = _vector_pack([X_train_main, X_pred])
-            else:
-                X_aux_pred = X_train_main
-            with scope(prefix = f"aux_{i}"):
-                aux_out = self.aux[i](X_train = X_train_aux[i], Y_train = Y_train_aux[i], X_pred = X_aux_pred, sample_missing = sample_missing)
-            if do_pred:
-                aux_out_train[i], aux_out_pred[i] = _vector_unpack(aux_out, (X_train_main.shape[-2], X_pred.shape[-2]))
-            else:
-                aux_out_train[i] = aux_out
         
-        # Main network
-        aux_out_train_cat = torch.cat(aux_out_train, dim=-1) # Need same shape as X_train_main except last dimension
-        if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
-            X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
-        X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
-        if do_pred:
+        # Training
+        if X_train_main is not None:
+            # Training data through aux networks
+            for i in range(len(self.aux)):
+                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train/aux{i}")
+            
+            # Pass main training X through aux networks
+            aux_out_train = [net(X_train_main, label=f"maintrain/aux{i}") for i,net in enumerate(self.aux)]
+            
+            # Training data through main network
+            # Concatenate training data
+            aux_out_train_cat = torch.cat(aux_out_train, dim=-1) # Need same shape as X_train_main except last dimension
+            if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
+                X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
+            X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
+            mu = self.main(X_train_main_full, Y_train_main, label="train/main")
+        else:
+            mu = None
+
+        # Prediction
+        if X_pred is not None:
+            # Pass prediction X through aux networks
+            aux_out_pred = [net(X_train_main, label=f"pred/aux{i}") for i,net in enumerate(self.aux)]
             aux_out_pred_cat = torch.cat(aux_out_pred, dim=-1) # Needs same shape as X_pred except last dimension
             if X_pred.shape[:-1] != aux_out_pred_cat.shape[:-1]:
                 X_pred = X_pred.unsqueeze(0).expand(*aux_out_pred_cat.shape[:-1], -1)
             X_pred_full = torch.cat([X_pred, aux_out_pred_cat], dim = -1)
+
+            # Combined prediction X through main network
+            mu_pred = self.main(X_pred_full, label="pred/main")
         else:
-            X_pred_full = None
-        with scope(prefix = "main"):
-            out_main = self.main(X_train = X_train_main_full, Y_train = Y_train_main, X_pred = X_pred_full, sample_missing = sample_missing)
-        # Rename overall predicted mean to conform to other naming
-        if do_pred:
-            pyro.deterministic("mu_pred", out_main, event_dim = 1)
-        return out_main
+            mu_pred = None
+        
+        return mu_pred if mu_pred is not None else mu
 
 
 def predictor(model, posterior_samples):

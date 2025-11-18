@@ -4,6 +4,13 @@ import pyro.nn as pnn
 
 __all__ = ["Normalizer", "PyroNormalizer", "UnNormalizer", "PyroUnNormalizer"]
 
+def mean_std(data: torch.Tensor, ndim=None):
+    if ndim is None:
+        ndim = data.ndim - 1
+    dims = tuple(range(ndim))
+    means = data.nanmean(dim=dims)
+    stds = (data - means).pow(2).nanmean(dim=dims).sqrt()
+    return means,stds
 
 class _MeanStdTransform(nn.Module):
     """Base class for normalization modules based on feature-wise means
@@ -24,10 +31,7 @@ class _MeanStdTransform(nn.Module):
     def from_data(cls, X: torch.Tensor, ndim=1):
         """Creates a Normalizer such that the given data would be normalized
         to have mean zero and standard deviation one."""
-        dims = tuple(range(ndim))
-        means = X.nanmean(dim=dims)
-        stds = (X - means).pow(2).nanmean(dim=dims).sqrt()
-
+        means,stds = mean_std(X, ndim)
         return cls(means, stds)
     
     def norm(self, X: torch.Tensor) -> torch.Tensor:
