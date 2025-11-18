@@ -184,11 +184,11 @@ class _BaseBNN(PyroModule):
                     dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
                     obs = Y_normed
                 )
-                if sample_missing:
-                    pyro.sample(
-                        "Y_normed_full", 
-                        ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
-                    )
+            if sample_missing:
+                pyro.sample(
+                    "Y_normed_full", 
+                    ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
+                )
         
         return mu
 
