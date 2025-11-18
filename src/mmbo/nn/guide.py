@@ -346,194 +346,23 @@ class RegBNNGuide(PyroModule):
     def __init__(self, model: RegBNN, sub_ll_train: bool = False):
         super().__init__()
 
-        self._model = (model,) # Do not register model as submodule
-        self.sub_ll_train = sub_ll_train
-
-        self.layers = PyroModuleList([])
-        insize = model.n_feat
-        for outsize in model.hidden_widths:
-            self.layers.append(
-                PyroModule[torch.nn.Sequential](
-                    BNNLinearLayerGuide(insize, outsize),
-                    BNNActivationLayerGuide(model.activation)
-                )    
-            )
-            insize = outsize
-
-        self.training_correlation = PyroParam(torch.eye(model.n_out), constraint = constraints.corr_cholesky)
-        self.training_bW_mean = PyroParam(torch.randn((model.n_out, insize + 1)))
-        self.training_bW_lambda_scale = PyroParam(model.Lambda0_tril @ _init_scale(insize + 1), constraint = constraints.lower_cholesky)
-
-
-    @property
-    def model(self):
-        return self._model[0]
-
-    def lastlayer_posterior(self, X, Y):
-        """Posterior parameter of precision matrix and weight/bias matrix.
-        precision|X,Y ~ Wishart(nu, V_tril @ V_tril.mT)
-        full_matrix|X,Y,precision ~ MatrixNormal(B.mT, precision^(-1), Lambda_tril @ Lambda_tril.mT)
-
-        This function does all of the expensive matrix calculations as few times
-        as possible.
-        """
-        # Reshape the inputs to be 2-d tensors, making matrix multipliations
-        # later work appropriately
-        X = X.reshape((-1, X.shape[-1]))
-        Y = Y.reshape((-1, Y.shape[-1]))
-
-        nu = self.model.nu0 + X.shape[:-1].numel()
-        Lambda_inv = self.model.Lambda0_inv + X.mT @ X
-        #Lambda = torch.linalg.inv(Lambda_inv)
-        #Lambda_tril = torch.linalg.cholesky(Lambda)
-        Lambda_tril = p2st_with_retry(Lambda_inv)
-        #B = Lambda_tril @ Lambda_tril.mT @ X.mT @ Y # Is this better?
-        #B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y]) # Is this better?
-        #B = torch.linalg.solve(Lambda_inv, X.mT @ Y)
-        B = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y])
-        SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
-        Prior_dist = B.mT @ self.model.Lambda0_inv @ B
-        #V_tril = torch.linalg.cholesky(torch.linalg.inv(self.model.V0_inv + SSE_dist + Prior_dist))
-        V_tril = p2st_with_retry(self.model.V0_inv + SSE_dist + Prior_dist)
-        return {
-            "nu": nu,
-            "Lambda_tril": Lambda_tril,
-            "B": B,
-            "V_tril": V_tril
-        }
-    
-    def missing_posterior_predictive(self, X, Y, j):
-        """Posterior predictive parameters for missing observations in a single
-        output. The joint posterior predictive distribution of new observations in
-        Bayesian linear regression is multivariate T with 'df' degrees of freedom,
-        location 'mu', and lower triangular scale 'Sigma_tril'.
-        """
-        # Extract/process data
-        y = Y[...,j]
-        k = self.model.n_out
-        y_present = y.isfinite()
-        y_obs = y[y_present].unsqueeze(-1) # Make n-by-1
-        X_obs = X[y_present,:]
-        X_miss = X[y_present.logical_not(),:]
-        n_obs = y_present.sum().item()
-        n_miss = y_present.logical_not().sum().item()
-        # Prior parameters
-        a0 = (self.model.nu0 - k + 1) / 2
-        b0 = self.model.V0_inv[j,j] / 2
-        Lambda0_inv = self.model.Lambda0_inv
-        # Posterior parameters
-        Lambda_inv = Lambda0_inv + X_obs.mT @ X_obs
-        Lambda = pd_inv_with_retry(Lambda_inv)
-        #mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
-        mu = Lambda @ X_obs.mT @ y_obs
-        a = a0 + n_obs / 2
-        #b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
-        b = b0 + (y_obs.mT @ (torch.eye(n_obs, dtype=X_miss.dtype, device=X_miss.device) - X_obs @ Lambda @ X_obs.mT) @ y_obs).squeeze().clamp(min = -1.99 * b0) / 2
-        # Compile into posterior predictive and return
-        Sigma = (b / a) * (torch.eye(n_miss, dtype=X_miss.dtype, device=X_miss.device) + 
-                           X_miss @ Lambda @ X_miss.mT)
-        Sigma_tril = cholesky_with_retry(Sigma)
-        return {
-            "df": 2 * a,
-            "mu": (X_miss @ mu).squeeze(-1),
-            "Sigma_tril": Sigma_tril
-        }
+        self.net = _BaseBNNGuide(model.net)
     
     def forward(self, *, 
                 X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
                 X_pred: torch.Tensor = None):
-        # Fill in training data
-        X_train = X_train if X_train is not None else self.model.X_train
-        if X_train is None:
-            raise ValueError("Must supply X_train")
-        Y_train = Y_train if Y_train is not None else self.model.Y_train
-        if Y_train is None:
-            raise ValueError("Must supply Y_train")
-
-        do_pred = (X_pred is not None)
-
-        # Normalize data with model's normalizers
-        X_normed = self.model.norm.norm(X_train)
-        Y_normed = self.model.unnorm.norm(Y_train)
-        if do_pred:
-            X_normed_pred = self.model.norm.norm(X_pred)
-        
-        # Pass through layers
-        activation = X_normed
-        if do_pred:
-            activation_pred = X_normed_pred
-        for layer in self.layers:
-            activation = layer(activation)
-            if do_pred:
-                activation_pred = layer(activation_pred)
-        
-        # Last layer
-        # Output multivariate normal precision matrix
-        # Conjugate prior with the previous layer activations serving as X
-
-        # Append an intercept to the activations, at the training and prediciton sites,
-        # and scale down by the sqrt of the last width
-        h_last = self.model.hidden_widths[-1]
-        ll_X = _add_intercept(activation / math.sqrt(h_last))
-        if do_pred:
-            ll_X_pred = _add_intercept(activation_pred / math.sqrt(h_last))
+        # Feed the training data through first (if present)
+        if X_train is not None:
+            mu = self.net(X_train, Y_train, label="train")
         else:
-            ll_X_pred = ll_X
-
-        if self.training and self.sub_ll_train:
-            # While training, use a standin distribution for the last layer with fixed
-            # variance equal to the prior, effectively weighting the observations vs the prior
-            precision = pyro.sample(
-                "precision",
-                dist.Delta(torch.linalg.inv(self.model.prior_variance * self.training_correlation), event_dim = 2)
-            )
-            with scope(prefix = "last"):
-                bW = pyro.sample(
-                    "bW",
-                    MatrixNormal(self.training_bW_mean, 
-                                 row_scale_tril = torch.linalg.cholesky(self.training_correlation) * math.sqrt(self.model.prior_variance),
-                                 col_scale_tril = self.training_bW_lambda_scale)
-                )
+            mu = None
+        # Feed the prediction data through second (if present)
+        if X_pred is not None:
+            mu_pred = self.net(X_pred, label="pred")
         else:
-            # When not training, calculate the conditional last layer using all
-            # training data (and imputed missing data)
-            # Fill in any missing data
-            Y_normed_full = Y_normed.clone()
-            Y_ismissing = Y_normed_full.isfinite().logical_not()
-            col_idx = torch.arange(0, Y_normed_full.shape[-1])
-            with scope(prefix = "missing_data"):
-                for j in range(Y_normed_full.shape[-1]):
-                    if Y_ismissing[...,j].any():
-                        post_pred = self.missing_posterior_predictive(ll_X, Y_normed_full, j)
-                        with scope(prefix = f"{j}"):
-                            y_new = pyro.sample(
-                                "y_new",
-                                dist.MultivariateStudentT(post_pred["df"], post_pred["mu"], post_pred["Sigma_tril"]),
-                                infer = {'is_auxiliary': True}
-                            )
-                        write_to = torch.logical_and(Y_ismissing, col_idx == j)
-                        Y_normed_full[write_to] = y_new
-            pyro.sample("Y_normed_full", dist.Delta(Y_normed_full, event_dim = Y_normed_full.ndim))
-            
-            # Calculate last layer full conditional parameters and sample last layer sites
-            posterior = self.lastlayer_posterior(ll_X, Y_normed_full)
-            # Precision matrix from full conditional
-            precision = pyro.sample(
-                "precision", 
-                dist.Wishart(posterior["nu"], scale_tril = posterior["V_tril"], validate_args = False)
-            )
-            # Weights and bias full conditional with conjugate Matrix Normal prior distribution
-            with scope(prefix = "last"):
-                bW = pyro.sample(
-                    "bW", 
-                    MatrixNormal(posterior["B"].mT, 
-                                #row_scale_tril = torch.linalg.cholesky(torch.linalg.inv(precision)), 
-                                row_scale_tril = _precision_to_scale_tril(precision),
-                                col_scale_tril = posterior["Lambda_tril"])
-                )
+            mu_pred = None
 
-        # Return the estimated means (at prediction sites if supplied)
-        return self.model.unnorm(ll_X_pred @ bW.mT)
+        return mu_pred if mu_pred is not None else mu
 
 
 class LayeredRegBNNGuide(PyroModule):
@@ -542,83 +371,48 @@ class LayeredRegBNNGuide(PyroModule):
         super().__init__()
         self.aux = PyroModuleList([])
         for net in model.aux:
-            self.aux.append(RegBNNGuide(net))
-        self.main = RegBNNGuide(model.main)
-        self._model = (model,)
+            self.aux.append(_BaseBNNGuide(net))
+        self.main = _BaseBNNGuide(model.main)
 
-    @property
-    def model(self):
-        return self._model[0]
-
-    def expose_main(self):
-        prefix = 'main'
-        def expose(msg):
-            if (msg['type'] == 'sample'):
-                return True
-            elif (msg['name'] is not None) and msg['name'].startswith(prefix):
-                return True
-            else:
-                return False
-        return pyro.poutine.block(self, expose_fn = expose)
-    
-    def expose_aux(self, num=None):
-        sample_prefix = 'aux' if num is None else f'aux_{num}'
-        param_prefix = 'aux' if num is None else f'aux.{num}'
-        def expose(msg):
-            if (msg['type'] == 'param') and msg['name'].startswith(param_prefix):
-                return True
-            elif (msg['type'] == 'sample') and msg['name'].startswith(sample_prefix):
-                return True
-            else:
-                return False
-        return pyro.poutine.block(self, expose_fn = expose)
 
     def forward(self, *, 
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
                 X_train_aux: Optional[Sequence[torch.Tensor]] = None, Y_train_aux: Optional[Sequence[torch.Tensor]] = None, 
                 X_pred: Optional[torch.Tensor] = None):
-        # Fill in training data from internal buffers if not provided
-        X_train_main = X_train_main if X_train_main is not None else self.model.X_train_main
-        if X_train_main is None:
-            raise ValueError("Must supply X_train_main")
-        Y_train_main = Y_train_main if Y_train_main is not None else self.model.Y_train_main
-        if Y_train_main is None:
-            raise ValueError("Must supply Y_train_main")
-        X_train_aux = X_train_aux if X_train_aux is not None else self.model.X_train_aux
-        if X_train_aux is None:
-            raise ValueError("Must supply X_train_aux")
-        Y_train_aux = Y_train_aux if Y_train_aux is not None else self.model.Y_train_aux
-        if Y_train_aux is None:
-            raise ValueError("Must supply Y_train_aux")
-
-        do_pred = (X_pred is not None)
-
-        # Auxiliary networks
-        aux_out_train = [None] * len(self.aux)
-        if do_pred:
-            aux_out_pred = [None] * len(self.aux)
-        for i in range(len(self.aux)):
-            if do_pred:
-                X_aux_pred = _vector_pack([X_train_main, X_pred])
-            else:
-                X_aux_pred = X_train_main
-            with scope(prefix = f"aux_{i}"):
-                aux_out = self.aux[i](X_train = X_train_aux[i], Y_train = Y_train_aux[i], X_pred = X_aux_pred)
-            if do_pred:
-                aux_out_train[i], aux_out_pred[i] = _vector_unpack(aux_out, (X_train_main.shape[:-1], X_pred.shape[:-1]))
-            else:
-                aux_out_train[i] = aux_out
-        
-        # Main network
-        X_train_main_full = torch.cat([X_train_main, *aux_out_train], dim = -1)
-        if do_pred:
-            X_pred_full = torch.cat([X_pred, *aux_out_pred], dim = -1)
+        # Training
+        if X_train_main is not None:
+            # Training data through aux networks
+            for i in range(len(self.aux)):
+                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train/aux{i}")
+            
+            # Pass main training X through aux networks
+            aux_out_train = [net(X_train_main, label=f"maintrain/aux{i}") for i,net in enumerate(self.aux)]
+            
+            # Training data through main network
+            # Concatenate training data
+            aux_out_train_cat = torch.cat(aux_out_train, dim=-1) # Need same shape as X_train_main except last dimension
+            if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
+                X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
+            X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
+            mu = self.main(X_train_main_full, Y_train_main, label="train/main")
         else:
-            X_pred_full = None
-        with scope(prefix = "main"):
-            out_main = self.main(X_train = X_train_main_full, Y_train = Y_train_main, X_pred = X_pred_full)
+            mu = None
+
+        # Prediction
+        if X_pred is not None:
+            # Pass prediction X through aux networks
+            aux_out_pred = [net(X_train_main, label=f"pred/aux{i}") for i,net in enumerate(self.aux)]
+            aux_out_pred_cat = torch.cat(aux_out_pred, dim=-1) # Needs same shape as X_pred except last dimension
+            if X_pred.shape[:-1] != aux_out_pred_cat.shape[:-1]:
+                X_pred = X_pred.unsqueeze(0).expand(*aux_out_pred_cat.shape[:-1], -1)
+            X_pred_full = torch.cat([X_pred, aux_out_pred_cat], dim = -1)
+
+            # Combined prediction X through main network
+            mu_pred = self.main(X_pred_full, label="pred/main")
+        else:
+            mu_pred = None
         
-        return out_main
+        return mu_pred if mu_pred is not None else mu
 
 
 def posterior_samples(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, num_samples, *args, **kwargs):
@@ -627,4 +421,4 @@ def posterior_samples(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, num
         guide.eval()
         pred = Predictive(guide.model, guide = guide, num_samples = num_samples)
         samples = pred.get_samples(*args, **kwargs)
-        return {n:samples[n].squeeze(1) for n in samples.keys() if not n.endswith("_pred")}
+        return {n:samples[n].squeeze(1) for n in samples.keys() if not n.startswith("pred/")}
