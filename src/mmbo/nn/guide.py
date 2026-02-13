@@ -168,8 +168,8 @@ class _BaseBNNGuide(PyroModule):
             insize = outsize
         
         # Values used to calculate the full conditional distribution of the last layer parameters
-        self.register_buffer("_training_activations", None)
-        self.register_buffer("_Y_train", None)
+        self._training_activations = None
+        self._Y_train = None
         self._posterior_params = {}
 
         # Important note: Because of the caching in PyroModules with PyroSample members,
@@ -181,7 +181,7 @@ class _BaseBNNGuide(PyroModule):
                 dist.Wishart(self._training_nu, scale_tril = self._training_V_tril, validate_args = False)
             )
         self.last_bW = PyroSample(lambda self:
-                MatrixNormal(self._training_last_bW_mean, 
+                MatrixNormal(self._training_last_bW_mean.mT, 
                              row_scale_tril = _precision_to_scale_tril(self.precision), 
                              col_scale_tril = self._training_Lambda_tril)
             )
@@ -200,6 +200,10 @@ class _BaseBNNGuide(PyroModule):
         self._training_activations = None
         self._Y_train = None
         self._posterior_params = None
+
+    @property
+    def _last_layer_training_is_set(self):
+        return (self._training_activations is not None) and (self._Y_train is not None)
 
     def _missing_posterior_predictive(self, X, Y, j):
         """Posterior predictive parameters for missing observations in a single
@@ -254,11 +258,12 @@ class _BaseBNNGuide(PyroModule):
                         )
                     write_to = torch.logical_and(Y_ismissing, col_idx == j)
                     Y_normed_full[write_to] = y_new
-        pyro.sample("Y_normed_full", dist.Delta(Y_normed_full, event_dim = Y_normed_full.ndim))
+        return pyro.sample("Y_normed_full", dist.Delta(Y_normed_full, event_dim = Y_normed_full.ndim))
 
     @property
     def _training_nu(self):
         if "training_nu" not in self._posterior_params:
+            assert self._last_layer_training_is_set
             training_nu = self.model.nu0 + self._Y_train.shape[:-1].numel()
             self._posterior_params["training_nu"] = training_nu
         return self._posterior_params["training_nu"]
@@ -266,6 +271,7 @@ class _BaseBNNGuide(PyroModule):
     @property
     def _training_V_tril(self):
         if "training_V_tril" not in self._posterior_params:
+            assert self._last_layer_training_is_set
             B = self._training_last_bW_mean
             X = self._training_activations
             Y = self._Y_train
@@ -278,6 +284,7 @@ class _BaseBNNGuide(PyroModule):
     @property
     def _training_last_bW_mean(self):
         if "training_last_bW_mean" not in self._posterior_params:
+            assert self._last_layer_training_is_set
             Lambda_tril = self._training_Lambda_tril
             X = self._training_activations
             Y = self._Y_train
@@ -288,7 +295,7 @@ class _BaseBNNGuide(PyroModule):
     @property
     def _training_Lambda_tril(self):
         if "training_Lambda_tril" not in self._posterior_params:
-            # Transform X by passing through hidden layers
+            assert self._last_layer_training_is_set
             X = self._training_activations
             Lambda_inv = self.model.Lambda0_inv + X.mT @ X
             self._posterior_params["training_Lambda_tril"] = p2st_with_retry(Lambda_inv)
@@ -296,11 +303,8 @@ class _BaseBNNGuide(PyroModule):
 
     def forward(self, X: torch.Tensor, Y: Optional[torch.Tensor] = None, label: str = "train"):
         
-        X_normed = self.norm.norm(X)
-        Y_normed = self.norm.norm(Y) if Y is not None else None
-
-        def data_plate():
-            return pyro.plate_stack("data", X_normed.shape[:-1], rightmost_dim=-1)
+        X_normed = self.model.norm.norm(X)
+        Y_normed = self.model.unnorm.norm(Y) if Y is not None else None
 
         # Hidden layers
         activation = X_normed
@@ -316,20 +320,17 @@ class _BaseBNNGuide(PyroModule):
         
         # Calculate missing Y values (if any) (if needed)
         # If a Y is passed in, calculate missing values. Otherwise, don't
-        if self._Y_train is not None:
+        if Y is not None:
             with scope(prefix=label):
                 # Calculate missing Y, store full Y, issue sample statement.
                 Y_full = self._get_full_Y(ll_X, Y_normed)
-        else:
-            Y_full = Y_normed
-        
-        # Set training data
-        self._set_last_layer_training(ll_X, Y_full)
+            # Set training data
+            self._set_last_layer_training(ll_X, Y_full)
 
         # Sample the last layer parameters
         # (just need to reference them to issue pyro.sample satements)
         weight = self.last_bW[:,1:]
-        bias = self.last_bW[:,1:]
+        bias = self.last_bW[:,0]
         precision = self.precision
 
         # Clear training data
@@ -347,6 +348,11 @@ class RegBNNGuide(PyroModule):
         super().__init__()
 
         self.net = _BaseBNNGuide(model.net)
+        self._model = (model,)
+
+    @property
+    def model(self):
+        return self._model[0]
     
     def forward(self, *, 
                 X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
@@ -373,7 +379,11 @@ class LayeredRegBNNGuide(PyroModule):
         for net in model.aux:
             self.aux.append(_BaseBNNGuide(net))
         self.main = _BaseBNNGuide(model.main)
+        self._model = (model,)
 
+    @property
+    def model(self):
+        return self._model[0]
 
     def forward(self, *, 
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
@@ -383,10 +393,10 @@ class LayeredRegBNNGuide(PyroModule):
         if X_train_main is not None:
             # Training data through aux networks
             for i in range(len(self.aux)):
-                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train/aux{i}")
+                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
             
             # Pass main training X through aux networks
-            aux_out_train = [net(X_train_main, label=f"maintrain/aux{i}") for i,net in enumerate(self.aux)]
+            aux_out_train = [self.aux[i](X_train_main, label=f"maintrain_aux{i}") for i in range(len(self.aux))]
             
             # Training data through main network
             # Concatenate training data
@@ -394,21 +404,21 @@ class LayeredRegBNNGuide(PyroModule):
             if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
                 X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
             X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
-            mu = self.main(X_train_main_full, Y_train_main, label="train/main")
+            mu = self.main(X_train_main_full, Y_train_main, label="train_main")
         else:
             mu = None
 
         # Prediction
         if X_pred is not None:
             # Pass prediction X through aux networks
-            aux_out_pred = [net(X_train_main, label=f"pred/aux{i}") for i,net in enumerate(self.aux)]
+            aux_out_pred = [self.aux[i](X_pred, label=f"pred_aux{i}") for i in range(len(self.aux))]
             aux_out_pred_cat = torch.cat(aux_out_pred, dim=-1) # Needs same shape as X_pred except last dimension
             if X_pred.shape[:-1] != aux_out_pred_cat.shape[:-1]:
                 X_pred = X_pred.unsqueeze(0).expand(*aux_out_pred_cat.shape[:-1], -1)
             X_pred_full = torch.cat([X_pred, aux_out_pred_cat], dim = -1)
 
             # Combined prediction X through main network
-            mu_pred = self.main(X_pred_full, label="pred/main")
+            mu_pred = self.main(X_pred_full, label="pred_main")
         else:
             mu_pred = None
         
@@ -421,4 +431,4 @@ def posterior_samples(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, num
         guide.eval()
         pred = Predictive(guide.model, guide = guide, num_samples = num_samples)
         samples = pred.get_samples(*args, **kwargs)
-        return {n:samples[n].squeeze(1) for n in samples.keys() if not n.startswith("pred/")}
+        return {n:samples[n].squeeze(1) for n in samples.keys() if not n.startswith("pred")}

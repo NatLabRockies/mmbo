@@ -152,17 +152,17 @@ class _BaseBNN(PyroModule):
     def forward(self, X: torch.Tensor, Y: Optional[torch.Tensor] = None, label: str = "train", sample_missing: bool = True):
         
         X_normed = self.norm.norm(X)
-        Y_normed = self.norm.norm(Y) if Y is not None else None
+        Y_normed = self.unnorm.norm(Y) if Y is not None else None
 
-        def data_plate():
-            return pyro.plate_stack("data", X_normed.shape[:-1], rightmost_dim=-1)
+        def data_plate(idx):
+            return pyro.plate_stack(f"data_{idx}", X_normed.shape[:-1], rightmost_dim=-1)
 
         # Hidden layers
         activation = X_normed
         for idx, layer in enumerate(self.layers):
             activation = layer(activation)
             with scope(prefix=label):
-                with data_plate():
+                with data_plate(idx):
                     pyro.deterministic(f"activation_{idx+1}", activation, event_dim=1)
         
         # Last layer
@@ -171,20 +171,21 @@ class _BaseBNN(PyroModule):
             ll_linear = linear
         else:
             ll_linear = _batch_linear
-        weight = self.last_bW[:,1:]
-        bias = self.last_bW[:,1:]
+        weight = self.last_bW[...,1:]
+        bias = self.last_bW[...,0]
         precision = self.precision
         with scope(prefix = label):
-            with data_plate():
+            with data_plate("last"):
                 activation = pyro.deterministic("activation_last", ll_linear(activation, weight / math.sqrt(h_last), bias), event_dim = 1)
                 mu_normed = activation
                 mu = pyro.deterministic("mu", self.unnorm(mu_normed), event_dim = 1)
-                obs_normed = pyro.sample(
-                    "obs_normed", 
-                    dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
-                    obs = Y_normed
-                )
-            if sample_missing:
+                if Y is not None:
+                    obs_normed = pyro.sample(
+                        "obs_normed", 
+                        dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
+                        obs = Y_normed
+                    )
+            if (Y is not None) and sample_missing:
                 pyro.sample(
                     "Y_normed_full", 
                     ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
@@ -309,7 +310,8 @@ class LayeredRegBNN(PyroModule):
         # Main network
         self.main = _BaseBNN(n_feat + sum(n_out_aux), n_out_main, *args,
                            feature_means = feature_main_means, feature_stds = feature_main_stds,
-                           out_means = out_main_means, out_stds = out_main_stds)
+                           out_means = out_main_means, out_stds = out_main_stds,
+                           **kwargs)
         
     @staticmethod
     def from_data(X_train_main: torch.Tensor, Y_train_main: torch.Tensor,
@@ -341,10 +343,10 @@ class LayeredRegBNN(PyroModule):
         if X_train_main is not None:
             # Training data through aux networks
             for i in range(len(self.aux)):
-                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train/aux{i}")
+                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
             
             # Pass main training X through aux networks
-            aux_out_train = [net(X_train_main, label=f"maintrain/aux{i}") for i,net in enumerate(self.aux)]
+            aux_out_train = [self.aux[i](X_train_main, label=f"maintrain_aux{i}") for i in range(len(self.aux))]
             
             # Training data through main network
             # Concatenate training data
@@ -352,21 +354,21 @@ class LayeredRegBNN(PyroModule):
             if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
                 X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
             X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
-            mu = self.main(X_train_main_full, Y_train_main, label="train/main")
+            mu = self.main(X_train_main_full, Y_train_main, label="train_main")
         else:
             mu = None
 
         # Prediction
         if X_pred is not None:
             # Pass prediction X through aux networks
-            aux_out_pred = [net(X_train_main, label=f"pred/aux{i}") for i,net in enumerate(self.aux)]
+            aux_out_pred = [self.aux[i](X_pred, label=f"pred_aux{i}") for i in range(len(self.aux))]
             aux_out_pred_cat = torch.cat(aux_out_pred, dim=-1) # Needs same shape as X_pred except last dimension
             if X_pred.shape[:-1] != aux_out_pred_cat.shape[:-1]:
                 X_pred = X_pred.unsqueeze(0).expand(*aux_out_pred_cat.shape[:-1], -1)
             X_pred_full = torch.cat([X_pred, aux_out_pred_cat], dim = -1)
 
             # Combined prediction X through main network
-            mu_pred = self.main(X_pred_full, label="pred/main")
+            mu_pred = self.main(X_pred_full, label="pred_main")
         else:
             mu_pred = None
         
