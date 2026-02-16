@@ -249,7 +249,7 @@ class _BaseBNNGuide(PyroModule):
         with scope(prefix = "missing_data"):
             for j in range(Y_normed_full.shape[-1]):
                 if Y_ismissing[...,j].any():
-                    post_pred = self.missing_posterior_predictive(X, Y_normed_full, j)
+                    post_pred = self._missing_posterior_predictive(X, Y_normed_full, j)
                     with scope(prefix = f"{j}"):
                         y_new = pyro.sample(
                             "y_new",
