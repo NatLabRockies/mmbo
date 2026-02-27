@@ -296,7 +296,8 @@ class LayeredRegBNN(PyroModule):
             self.aux.append(
                 RegBNN(n_feat, out, *args,
                        feature_means = feature_means, feature_stds = feature_stds,
-                       out_means = means, out_stds = stds, **kwargs)
+                       out_means = means, out_stds = stds, 
+                       **kwargs)
             )
         
         # Assemble the full feature means and stds if provided for the main network
@@ -312,7 +313,8 @@ class LayeredRegBNN(PyroModule):
         # Main network
         self.main = RegBNN(n_feat + sum(n_out_aux), n_out_main, *args,
                            feature_means = feature_main_means, feature_stds = feature_main_stds,
-                           out_means = out_main_means, out_stds = out_main_stds)
+                           out_means = out_main_means, out_stds = out_main_stds,
+                           **kwargs)
 
         self.register_buffer("X_train_main", None)
         self.register_buffer("Y_train_main", None)
