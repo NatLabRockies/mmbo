@@ -15,7 +15,7 @@ from pyro.contrib.autoname import scope
 from .normalizer import PyroNormalizer, PyroUnNormalizer
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 
-__all__ = ["RegBNN", "LayeredRegBNN"]
+__all__ = ["RegBNN", "LayeredRegBNN", "predictor"]
 
 def _gen_Lambda0_tril(width, prior_variance):
         mat = torch.eye(width+1) / math.sqrt(width)
@@ -421,3 +421,14 @@ class LayeredRegBNN(PyroModule):
         if do_pred:
             pyro.deterministic("mu_pred", out_main, event_dim = 1)
         return out_main
+
+def predictor(model, posterior_samples):
+    numsamples = next(iter(posterior_samples.values())).shape[0]
+    def conditioned_model(idx):
+        return pyro.poutine.condition(model, data = {n:posterior_samples[n][idx] for n in posterior_samples})
+    def f(X_test):
+        return torch.cat(
+            [conditioned_model(i)(X_pred = X_test).unsqueeze(0) for i in range(numsamples)],
+            dim = 0
+        )
+    return f
