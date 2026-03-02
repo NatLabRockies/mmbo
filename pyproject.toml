@@ -10,7 +10,7 @@ include-package-data = true
 
 [project]
 name = "mmbo"
-version = "0.0.1"
+version = "2.0.0"
 dependencies = [
 	"botorch",
 	"numpy",
