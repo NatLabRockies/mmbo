@@ -33,18 +33,18 @@ li2_energy = make_tablefunc(_li2_data, "Dist", "HF")
 be2_energy = make_tablefunc(_be2_data, "Dist", "HF")
 
 # Load ERA wind speed data and create test functions
-#_wind_data = pd.read_csv(resources.files("mmbo.examples").joinpath("il_argonne_obs_era.csv"))
+_wind_data = pd.read_csv(resources.files("mmbo.examples").joinpath("il_argonne_obs_era.csv"))
 # X variable as scaled time
-#_wind_data['Time'] = pd.to_datetime(_wind_data['Time'])
-#_wind_data['X'] = (_wind_data['Time'] - _wind_data['Time'].min()).apply(lambda x: x.days + x.seconds / (24*60*60))
-#del _wind_data['Time']
+_wind_data['Time'] = pd.to_datetime(_wind_data['Time'])
+_wind_data['X'] = (_wind_data['Time'] - _wind_data['Time'].min()).apply(lambda x: x.days + x.seconds / (24*60*60))
+del _wind_data['Time']
 # Decompose wind direction
-#for dircol in ['obs_Dir10m', 'obs_Dir60m', 'era_Dir10m', 'era_Dir100m']:
-#    _wind_data[dircol+'_sin'] = np.sin(_wind_data[dircol] * np.pi / 180)
-#    _wind_data[dircol+'_cos'] = np.cos(_wind_data[dircol] * np.pi / 180)
-#    del _wind_data[dircol]
+for dircol in ['obs_Dir10m', 'obs_Dir60m', 'era_Dir10m', 'era_Dir100m']:
+    _wind_data[dircol+'_sin'] = np.sin(_wind_data[dircol] * np.pi / 180)
+    _wind_data[dircol+'_cos'] = np.cos(_wind_data[dircol] * np.pi / 180)
+    del _wind_data[dircol]
 
-#era_wind = make_tablefunc(_wind_data, "X")
+era_wind = make_tablefunc(_wind_data, "X")
 
 # "Friendlier" test functions that are designed to have discrete additive components
 def nice_periodic(X: torch.Tensor, m=0):
