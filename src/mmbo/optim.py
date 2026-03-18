@@ -2,7 +2,7 @@ import pyro
 from pyro.infer import Predictive
 import torch
 from torch.quasirandom import SobolEngine
-from .nn import predictor, predictor_batch
+from .nn import predictor
 
 
 def expected_improvement(model, posterior_samples, X_test, current_min):
@@ -12,11 +12,6 @@ def expected_improvement(model, posterior_samples, X_test, current_min):
 
 def expected_improvement_softplus(model, posterior_samples, X_test, current_min):
     pred = predictor(model, posterior_samples)
-    Y_samples = pred(X_test)
-    return torch.nn.functional.softplus(current_min - Y_samples).mean(dim=0)
-
-def expected_improvement_softplus_batch(model, posterior_samples, X_test, current_min):
-    pred = predictor_batch(model, posterior_samples)
     Y_samples = pred(X_test)
     return torch.nn.functional.softplus(current_min - Y_samples).mean(dim=0)
 
