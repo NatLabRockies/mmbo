@@ -1,10 +1,10 @@
 # mmbo
-Surrogate Models for Multi-modal Bayesian Optimization
+Multi-modal Bayesian Neural Network Surrogate Models
 
 ## Installation
 
 ```
-pip install git+https://github.nrel.gov/itaylor/mmbo
+pip install git+https://github.com/NatLabRockies/mmbo
 ```
 
 ## Overview

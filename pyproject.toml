@@ -21,7 +21,7 @@ dependencies = [
 	"torch_pca"
 ]
 authors = [
-	{name="Ian Taylor", email="ian.taylor@nrel.gov"},
+	{name="Ian Taylor", email="ian.taylor@nlr.gov"},
 ]
 description = "Multimodal Bayesian Optimization"
 readme = "README.md"
@@ -41,4 +41,4 @@ notebooks = [
 ]
 
 [project.urls]
-Homepage = "https://github.nrel.gov/itaylor/mmbo"
+Homepage = "https://github.com/NatLabRockies/mmbo"
