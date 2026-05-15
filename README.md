@@ -111,3 +111,7 @@ svi = pyro.infer.SVI(model, guide, adam, elbo)
 # rate).
 params, losses = do_svi(svi, params = None)
 ```
+
+## References
+
+Released under NLR software record SWR-25-119.
