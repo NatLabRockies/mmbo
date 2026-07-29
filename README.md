@@ -115,3 +115,18 @@ params, losses = do_svi(svi, params = None)
 ## References
 
 Released under NLR software record SWR-25-119.
+
+To cite, please use
+
+```
+@misc{ doecode_181165,
+title = {mmbo (Multi-modal Bayesian Optimization) [SWR-25-119]},
+author = {Taylor, Ian and Mueller, Juliane and Bessac, Julie},
+abstractNote = {This package implements Bayesian Neural Network (BNN) based surrogate models for multi-modal data. These models are fit using a custom Variational Bayes procedure leveraging conjugate posteriors in the last layer of the network, offering more accurate predictions with better-calibrated uncertainty quantification than mean-field Variational Bayes.},
+doi = {10.11578/dc.20260519.1},
+url = {https://doi.org/10.11578/dc.20260519.1},
+howpublished = {[Computer Software] \url{https://doi.org/10.11578/dc.20260519.1}},
+year = {2026},
+month = {apr}
+}
+```
