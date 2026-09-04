@@ -6,7 +6,7 @@ import datetime
 import torch
 import pyro
 
-def do_svi(svi, *args, check_interval=1000, max_nonimproved = 3, params = None, **kwargs):
+def do_svi(svi, *args, check_interval=1000, min_iter = 0, max_nonimproved = 3, params = None, **kwargs):
     losses = []
     current_loss = 0
     nonimproved = 0
@@ -16,7 +16,7 @@ def do_svi(svi, *args, check_interval=1000, max_nonimproved = 3, params = None, 
             pass
     best_params = copy.deepcopy(params)
     print("{} - Start".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    while nonimproved < max_nonimproved:
+    while (len(losses) < min_iter) or (nonimproved < max_nonimproved):
         with pyro.get_param_store().scope(params):
             loss = svi.step(*args, **kwargs)
         losses.append(loss)
