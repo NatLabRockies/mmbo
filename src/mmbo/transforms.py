@@ -124,5 +124,5 @@ except NotImplementedError:
     def _biject_to_positive_definite(constraint):
         return PositiveDefiniteTransform()
 else:
-    msg = f"A bijection for PositiveDefinite constraint alreay exists in your version of pytorch ({torch.__version_})"
+    msg = f"A bijection for PositiveDefinite constraint alreay exists in your version of pytorch ({torch.__version__})"
     logging.info(msg)
