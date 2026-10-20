@@ -85,7 +85,7 @@ except NotImplementedError:
     def _biject_to_lower_cholesky(constraint):
         return LowerCholeskyTransform()
 else:
-    msg = f"A bijection for LowerCholesky constraint alreay exists in your version of pytorch ({torch.__version_})"
+    msg = f"A bijection for LowerCholesky constraint alreay exists in your version of pytorch ({torch.__version__})"
     logging.info(msg)
 
 # Check if there is already a bijection for positive definite matrices,
