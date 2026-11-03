@@ -336,7 +336,7 @@ class _BaseBNNGuide(PyroModule):
         # Clear training data
         self._clear_last_layer_training()
 
-        return self.model.unnorm(linear(activation, weight, bias))
+        return self.model.unnorm(linear(activation / math.sqrt(h_last), weight, bias))
 
         
 
