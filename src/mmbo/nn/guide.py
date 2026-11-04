@@ -15,84 +15,9 @@ from pyro.infer import Predictive
 
 from .network import RegBNN, LayeredRegBNN, _BaseBNN, _vector_pack, _vector_unpack, _batch_linear
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
-from ..util import make_positive_definite
+from ..util import pd_inv_with_retry, p2st_with_retry, cholesky_with_retry
 
 __all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples"]
-
-def make_positive_definite_flipped(A: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-    return make_positive_definite(A.flip((-2, -1)), *args, **kwargs).flip((-2, -1))
-
-def cholesky_with_retry(A: torch.Tensor, tries: int = 100) -> torch.Tensor:
-    result = None
-    cnt = 0
-    while (result is None) and (cnt < tries):
-        cnt += 1
-        try:
-            result = torch.linalg.cholesky(A)
-        except torch.linalg.LinAlgError as e:
-            if cnt == tries:
-                raise Exception("Positive definite correction tries exceeded.")
-            result = None
-            A_new = make_positive_definite(A)
-            if (A == A_new).all():
-                raise Exception("Positive definite correction failed to change matrix.")
-            A = A_new
-    return result
-
-def p2st_with_retry(A: torch.Tensor, tries: int = 100) -> torch.Tensor:
-    result = None
-    cnt = 0
-    while (result is None) and (cnt < tries):
-        cnt += 1
-        try:
-            result = _precision_to_scale_tril(A)
-        except torch.linalg.LinAlgError as e:
-            if cnt == tries:
-                raise Exception("Positive definite correction tries exceeded.")
-            result = None
-            A_new = make_positive_definite_flipped(A)
-            if (A == A_new).all():
-                raise Exception("Positive definite correction failed to change matrix.")
-            A = A_new
-    return result
-
-def pd_inv_with_retry(A: torch.Tensor, tries: int = 100) -> torch.Tensor:
-    result = None
-    cnt = 0
-    while (result is None) and (cnt < tries):
-        cnt += 1
-        try:
-            result = torch.linalg.inv(A)
-        except torch.linalg.LinAlgError as e:
-            if cnt == tries:
-                raise Exception("Positive definite correction tries exceeded.")
-            result = None
-            A_new = make_positive_definite(A)
-            if (A == A_new).all():
-                raise Exception("Positive definite correction failed to change matrix.")
-            A = A_new
-    return result
-
-def _woodbury_inv(A_inv_diag: torch.Tensor, X: torch.Tensor, C_inv: torch.Tensor = None):
-    """Inverts a matrix of the form M = (A + X^T * C * X), where A is diagonal,
-    using a simplified Woodbury identity,
-    M^(-1) = A^(-1) - A^(-1) * X^T * (C^(-1) + X * A^(-1) * X^T)^(-1) * X * A^(-1)
-    Omitting C_inv (C_inv = None) implies C = I.
-    A is p-by-p, X is n-by-p, and C is n-by-n. If n < p (X is wide), this is 
-    faster than directly inverting M because only a n-by-n matrix needs to be 
-    inverted rather than a p-by-p matrix.
-    Notice that only the inverses of A and C are required in the formula so this
-    function accepts a precomputed A_inv_diag and C_inv.
-    """
-    if C_inv is None:
-        # C is the identity, auto-generate C_inv = I
-        n = X.shape[-2]
-        device = A_inv_diag.device
-        dtype = A_inv_diag.dtype
-        C_inv = torch.eye(n, device = device, dtype = dtype)
-    X_scaled = X * A_inv_diag.unsqueze(-2) # Column-scaled X, as if post-multiplied by A^(-1) 
-    B = C_inv + X_scaled @ X.mT
-    return A_inv_diag.diag_embed() - X_scaled.mT @ torch.linalg.solve(B, X_scaled)
 
 def _init_scale(n: int) -> torch.Tensor:
     """Generate a random cholesky factor of a positive definite matrix
@@ -116,7 +41,7 @@ class BNNLinearLayerGuide(PyroModule):
         self.loc = PyroParam(torch.randn((outsize, insize + 1)))
         #self.row_scale = PyroParam(_init_scale(outsize), constraint = constraints.lower_cholesky)
         #self.col_scale = PyroParam(_init_scale(insize + 1), constraint = constraints.lower_cholesky)
-        self.scale = PyroParam(torch.rand((outsize, insize + 1)), constraint = constraints.positive)
+        self.scale = PyroParam(torch.rand((outsize, insize + 1)).clamp(min=1e-6), constraint = constraints.positive)
         # Scale the weights by the inverse square root of the input size,
         # known as the Neural Tangent Kernel parameterization?
         self.register_buffer("k", torch.as_tensor(1.0 / math.sqrt(insize)))
@@ -182,7 +107,7 @@ class _BaseBNNGuide(PyroModule):
             )
         self.last_bW = PyroSample(lambda self:
                 MatrixNormal(self._training_last_bW_mean.mT, 
-                             row_scale_tril = _precision_to_scale_tril(self.precision), 
+                             row_scale_tril = p2st_with_retry(self.precision), #_precision_to_scale_tril(self.precision), 
                              col_scale_tril = self._training_Lambda_tril)
             )
 

@@ -15,6 +15,7 @@ from pyro.infer import Predictive
 
 from .normalizer import PyroNormalizer, PyroUnNormalizer, mean_std
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
+from ..util import p2st_with_retry
 
 __all__ = ["RegBNN", "LayeredRegBNN", "predictor", "predictor_batch"]
 
@@ -145,7 +146,7 @@ class _BaseBNN(PyroModule):
         self.precision = PyroSample(dist.Wishart(self.nu0, scale_tril = self.V0_tril, validate_args = False))
         self.last_bW = PyroSample(lambda self:
                 MatrixNormal(self.last_bW_mean, 
-                             row_scale_tril = _precision_to_scale_tril(self.precision), 
+                             row_scale_tril = p2st_with_retry(self.precision), #_precision_to_scale_tril(self.precision), 
                              col_scale_tril = self.Lambda0_tril)
             )
         
@@ -174,6 +175,7 @@ class _BaseBNN(PyroModule):
         weight = self.last_bW[...,1:]
         bias = self.last_bW[...,0]
         precision = self.precision
+        cov_tril = p2st_with_retry(precision)
         with scope(prefix = label):
             with data_plate("last"):
                 activation = pyro.deterministic("activation_last", ll_linear(activation, weight / math.sqrt(h_last), bias), event_dim = 1)
@@ -182,13 +184,13 @@ class _BaseBNN(PyroModule):
                 if Y is not None:
                     obs_normed = pyro.sample(
                         "obs_normed", 
-                        dist.NanMaskedMultivariateNormal(mu_normed, precision_matrix = precision, validate_args = False), 
+                        dist.NanMaskedMultivariateNormal(mu_normed, scale_tril = cov_tril, validate_args = False), 
                         obs = Y_normed
                     )
             if (Y is not None) and sample_missing:
                 pyro.sample(
                     "Y_normed_full", 
-                    ConditionalMultivariateNormal(mu_normed, obs_normed, precision_matrix = precision, validate_args = False).to_event(mu_normed.ndim - 1)
+                    ConditionalMultivariateNormal(mu_normed, obs_normed, scale_tril = cov_tril, validate_args = False).to_event(mu_normed.ndim - 1)
                 )
         
         return mu
