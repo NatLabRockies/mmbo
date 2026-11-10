@@ -340,12 +340,21 @@ class LayeredRegBNN(PyroModule):
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
                 X_train_aux: Optional[Sequence[torch.Tensor]] = None, Y_train_aux: Optional[Sequence[torch.Tensor]] = None, 
                 X_pred: Optional[torch.Tensor] = None, sample_missing: bool = True):
-        
+        """X_train_aux and Y_train_aux may be omitted entirely, or individual elements may be None,
+        in which case the corresponding aux networks are not conditioned on training data (useful
+        when their sites are conditioned on existing posterior samples). For each aux network,
+        X and Y must be both supplied or both None."""
         # Training
         if X_train_main is not None:
-            # Training data through aux networks
-            for i in range(len(self.aux)):
-                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
+            # Training data through aux networks (skipped for any network not supplied)
+            n_aux = len(self.aux)
+            X_train_aux = [None] * n_aux if X_train_aux is None else X_train_aux
+            Y_train_aux = [None] * n_aux if Y_train_aux is None else Y_train_aux
+            for i in range(n_aux):
+                if (X_train_aux[i] is None) != (Y_train_aux[i] is None):
+                    raise ValueError(f"X_train_aux[{i}] and Y_train_aux[{i}] must both be supplied or both be None.")
+                if X_train_aux[i] is not None:
+                    self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
             
             # Pass main training X through aux networks
             aux_out_train = [self.aux[i](X_train_main, label=f"maintrain_aux{i}") for i in range(len(self.aux))]

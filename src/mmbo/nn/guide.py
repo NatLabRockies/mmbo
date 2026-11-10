@@ -1,4 +1,5 @@
 import math
+from contextlib import contextmanager
 from typing import Optional, Sequence, Union
 
 from pyro.nn import PyroModule, PyroSample, PyroParam, PyroModuleList
@@ -17,7 +18,7 @@ from .network import RegBNN, LayeredRegBNN, _BaseBNN, _vector_pack, _vector_unpa
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 from ..util import pd_inv_with_retry, p2st_with_retry, cholesky_with_retry
 
-__all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples"]
+__all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples", "allow_prior"]
 
 def _init_scale(n: int) -> torch.Tensor:
     """Generate a random cholesky factor of a positive definite matrix
@@ -96,12 +97,15 @@ class _BaseBNNGuide(PyroModule):
         self._training_activations = None
         self._Y_train = None
         self._posterior_params = {}
+        self._allow_prior = False
 
         # Important note: Because of the caching in PyroModules with PyroSample members,
         # these sampling statements will only be executed once, on the first forward() pass
-        # through the module. In the intended use of this class (as a submodule of an outer 
+        # through the module. In the intended use of this class (as a submodule of an outer
         # module), therefore the first call of the model MUST have the training data on which the
-        # posterior is calculated.
+        # posterior is calculated, unless it is called inside an allow_prior() context, in which
+        # case the last layer distributions fall back to the model's prior. This is intended for
+        # when the last layer sites are conditioned on existing posterior samples.
         self.precision = PyroSample(lambda self: 
                 dist.Wishart(self._training_nu, scale_tril = self._training_V_tril, validate_args = False)
             )
@@ -124,7 +128,7 @@ class _BaseBNNGuide(PyroModule):
     def _clear_last_layer_training(self):
         self._training_activations = None
         self._Y_train = None
-        self._posterior_params = None
+        self._posterior_params = {}
 
     @property
     def _last_layer_training_is_set(self):
@@ -188,46 +192,59 @@ class _BaseBNNGuide(PyroModule):
     @property
     def _training_nu(self):
         if "training_nu" not in self._posterior_params:
-            assert self._last_layer_training_is_set
-            training_nu = self.model.nu0 + self._Y_train.shape[:-1].numel()
+            if self._last_layer_training_is_set:
+                training_nu = self.model.nu0 + self._Y_train.shape[:-1].numel()
+            else:
+                assert self._allow_prior, "Last layer training data is not set (outside of an allow_prior() context)."
+                training_nu = self.model.nu0
             self._posterior_params["training_nu"] = training_nu
         return self._posterior_params["training_nu"]
 
     @property
     def _training_V_tril(self):
         if "training_V_tril" not in self._posterior_params:
-            assert self._last_layer_training_is_set
-            B = self._training_last_bW_mean
-            X = self._training_activations
-            Y = self._Y_train
-            SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
-            Prior_dist = B.mT @ self.model.Lambda0_inv @ B
-            training_V_tril = p2st_with_retry(self.model.V0_inv + SSE_dist + Prior_dist)
+            if self._last_layer_training_is_set:
+                B = self._training_last_bW_mean
+                X = self._training_activations
+                Y = self._Y_train
+                SSE_dist = (Y - X @ B).mT @ (Y - X @ B)
+                Prior_dist = B.mT @ self.model.Lambda0_inv @ B
+                training_V_tril = p2st_with_retry(self.model.V0_inv + SSE_dist + Prior_dist)
+            else:
+                assert self._allow_prior, "Last layer training data is not set (outside of an allow_prior() context)."
+                training_V_tril = self.model.V0_tril
             self._posterior_params["training_V_tril"] = training_V_tril
         return self._posterior_params["training_V_tril"]
     
     @property
     def _training_last_bW_mean(self):
         if "training_last_bW_mean" not in self._posterior_params:
-            assert self._last_layer_training_is_set
-            Lambda_tril = self._training_Lambda_tril
-            X = self._training_activations
-            Y = self._Y_train
-            training_last_bW_mean = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y])
+            if self._last_layer_training_is_set:
+                Lambda_tril = self._training_Lambda_tril
+                X = self._training_activations
+                Y = self._Y_train
+                training_last_bW_mean = torch.linalg.multi_dot([Lambda_tril, Lambda_tril.mT, X.mT, Y])
+            else:
+                assert self._allow_prior, "Last layer training data is not set (outside of an allow_prior() context)."
+                # Model stores the mean as (n_out, h_last + 1); this property is the transpose
+                training_last_bW_mean = self.model.last_bW_mean.mT
             self._posterior_params["training_last_bW_mean"] = training_last_bW_mean
         return self._posterior_params["training_last_bW_mean"]
 
     @property
     def _training_Lambda_tril(self):
         if "training_Lambda_tril" not in self._posterior_params:
-            assert self._last_layer_training_is_set
-            X = self._training_activations
-            Lambda_inv = self.model.Lambda0_inv + X.mT @ X
-            self._posterior_params["training_Lambda_tril"] = p2st_with_retry(Lambda_inv)
+            if self._last_layer_training_is_set:
+                X = self._training_activations
+                Lambda_inv = self.model.Lambda0_inv + X.mT @ X
+                self._posterior_params["training_Lambda_tril"] = p2st_with_retry(Lambda_inv)
+            else:
+                assert self._allow_prior, "Last layer training data is not set (outside of an allow_prior() context)."
+                self._posterior_params["training_Lambda_tril"] = self.model.Lambda0_tril
         return self._posterior_params["training_Lambda_tril"]
 
     def forward(self, X: torch.Tensor, Y: Optional[torch.Tensor] = None, label: str = "train"):
-        
+
         X_normed = self.model.norm.norm(X)
         Y_normed = self.model.unnorm.norm(Y) if Y is not None else None
 
@@ -314,12 +331,21 @@ class LayeredRegBNNGuide(PyroModule):
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
                 X_train_aux: Optional[Sequence[torch.Tensor]] = None, Y_train_aux: Optional[Sequence[torch.Tensor]] = None, 
                 X_pred: Optional[torch.Tensor] = None):
+        """X_train_aux and Y_train_aux may be omitted entirely, or individual elements may be None,
+        but only inside an allow_prior() context with the corresponding aux sites conditioned on
+        existing samples. For each aux network, X and Y must be both supplied or both None."""
         # Training
         if X_train_main is not None:
-            # Training data through aux networks
-            for i in range(len(self.aux)):
-                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
-            
+            # Training data through aux networks (skipped for any network not supplied)
+            n_aux = len(self.aux)
+            X_train_aux = [None] * n_aux if X_train_aux is None else X_train_aux
+            Y_train_aux = [None] * n_aux if Y_train_aux is None else Y_train_aux
+            for i in range(n_aux):
+                if (X_train_aux[i] is None) != (Y_train_aux[i] is None):
+                    raise ValueError(f"X_train_aux[{i}] and Y_train_aux[{i}] must both be supplied or both be None.")
+                if X_train_aux[i] is not None:
+                    self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
+
             # Pass main training X through aux networks
             aux_out_train = [self.aux[i](X_train_main, label=f"maintrain_aux{i}") for i in range(len(self.aux))]
             
@@ -357,3 +383,19 @@ def posterior_samples(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, num
         pred = Predictive(guide.model, guide = guide, num_samples = num_samples)
         samples = pred.get_samples(*args, **kwargs)
         return {n:samples[n].squeeze(1) for n in samples.keys() if not n.startswith("pred")}
+
+@contextmanager
+def allow_prior(guide: PyroModule):
+    """Within this context, any _BaseBNNGuide inside `guide` (including `guide` itself) that is
+    called without training data falls back to the model's prior for its last layer distributions,
+    instead of raising. Intended for when the last layer sites are conditioned on existing
+    posterior samples. Previous settings are restored on exit, so nesting is safe."""
+    subguides = [m for m in guide.modules() if isinstance(m, _BaseBNNGuide)]
+    previous = [m._allow_prior for m in subguides]
+    for m in subguides:
+        m._allow_prior = True
+    try:
+        yield guide
+    finally:
+        for m, p in zip(subguides, previous):
+            m._allow_prior = p
