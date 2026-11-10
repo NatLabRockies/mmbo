@@ -18,7 +18,7 @@ from .network import RegBNN, LayeredRegBNN, _BaseBNN, _vector_pack, _vector_unpa
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 from ..util import pd_inv_with_retry, p2st_with_retry, cholesky_with_retry
 
-__all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples", "allow_prior"]
+__all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples", "allow_prior", "recondition", "recondition_aux"]
 
 def _init_scale(n: int) -> torch.Tensor:
     """Generate a random cholesky factor of a positive definite matrix
@@ -129,6 +129,11 @@ class _BaseBNNGuide(PyroModule):
         self._training_activations = None
         self._Y_train = None
         self._posterior_params = {}
+
+    @property
+    def _last_layer_site_names(self):
+        """Full names of the sample sites for this network's last layer parameters."""
+        return (f"{self._pyro_name}.precision", f"{self._pyro_name}.last_bW")
 
     @property
     def _last_layer_training_is_set(self):
@@ -399,3 +404,80 @@ def allow_prior(guide: PyroModule):
     finally:
         for m, p in zip(subguides, previous):
             m._allow_prior = p
+
+def _recondition(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, samples,
+                 resample: Sequence[_BaseBNNGuide], carry_over: Sequence[str], **kwargs):
+    """Shared implementation of recondition() and recondition_aux().
+
+    Every parameter site of every subnetwork is held fixed at its value in `samples`, except the
+    last layer sites of the subnetworks in `resample`, which are redrawn from their full conditional
+    given the (new) training data in kwargs. The model's data-dependent sites (mu, activations,
+    etc.) are then regenerated, exactly as in posterior_samples(). Sites in `samples` whose names
+    start with any prefix in `carry_over` belong to training data that was not passed in, and are
+    copied over unchanged."""
+    subguides = [m for m in guide.modules() if isinstance(m, _BaseBNNGuide)]
+    prefixes = tuple(f"{m._pyro_name}." for m in subguides)
+    resampled = {n for m in resample for n in m._last_layer_site_names}
+    kept = {n: v for n, v in samples.items() if n.startswith(prefixes) and n not in resampled}
+
+    with pyro.get_param_store().scope(params), allow_prior(guide):
+        guide.eval()
+        # Pyro's Predictive does not accept both a guide and posterior samples, so run the guide
+        # (as the "model") conditioned on the kept sites, which returns just the redrawn sites...
+        redrawn = Predictive(guide, posterior_samples = kept)(**kwargs)
+        latent = {**kept, **redrawn}
+        # ...then run the model conditioned on all guide sites, returning all model sites
+        # exactly as posterior_samples() does.
+        new = Predictive(guide.model, posterior_samples = latent, return_sites = None)(**kwargs)
+        new = {n: new[n].squeeze(1) for n in new.keys() if not n.startswith("pred")}
+
+    carried = {n: v for n, v in samples.items() if carry_over and n.startswith(tuple(carry_over))}
+    return {**new, **carried}
+
+def recondition(guide: Union[RegBNNGuide, LayeredRegBNNGuide], params, samples, **kwargs):
+    """Take a fitted guide, existing posterior samples, and new training data, and 'recondition'
+    the samples on the new training data. This involves re-drawing the last layer parameters
+    (weights, biases, and error covariance) of the main network (the only network of a RegBNNGuide)
+    from their full conditional given the new training data and the existing hidden layer samples.
+    Presumably the training data would be the same as the data used to train the guide except for
+    one or two new observations. Then this function can be thought of as an approximate partial
+    posterior update, where retraining would be a more complete posterior update. This function
+    leaves posterior samples except for the last layer intact. If full new samples are desired,
+    posterior_samples() can be called with the new data.
+
+    kwargs are the training data, as passed to the guide: X_train and Y_train for a RegBNNGuide,
+    X_train_main and Y_train_main for a LayeredRegBNNGuide. For a LayeredRegBNNGuide the aux networks
+    are left exactly as they are in `samples`, so aux training data may not be passed; use
+    recondition_aux() to recondition on new aux data.
+
+    Returns a dictionary with the same structure as posterior_samples()."""
+    if isinstance(guide, LayeredRegBNNGuide):
+        if kwargs.get("X_train_aux") is not None or kwargs.get("Y_train_aux") is not None:
+            raise ValueError("recondition() keeps the aux networks fixed, so aux training data may not "
+                             "be passed. Use recondition_aux() to recondition on new aux data.")
+        resample = [guide.main]
+        carry_over = [f"train_aux{i}/" for i in range(len(guide.aux))]
+    else:
+        resample = [guide.net]
+        carry_over = []
+    return _recondition(guide, params, samples, resample, carry_over, **kwargs)
+
+def recondition_aux(guide: LayeredRegBNNGuide, params, samples,
+                    X_train_main: torch.Tensor, Y_train_main: torch.Tensor,
+                    X_train_aux: Sequence[Optional[torch.Tensor]], Y_train_aux: Sequence[Optional[torch.Tensor]]):
+    """Like recondition(), but for new aux training data in a LayeredRegBNNGuide. For each aux
+    network i with X_train_aux[i] supplied, its last layer parameters are re-drawn given the new
+    aux data. Elements of X_train_aux and Y_train_aux may be None, in which case that aux network
+    is left exactly as it is in `samples`. Because the outputs of the aux networks are inputs to
+    the main network, the main network's last layer is always re-drawn as well, which is why the
+    main training data is required.
+
+    Returns a dictionary with the same structure as posterior_samples()."""
+    if len(X_train_aux) != len(guide.aux) or len(Y_train_aux) != len(guide.aux):
+        raise ValueError(f"X_train_aux and Y_train_aux must have one element per aux network ({len(guide.aux)}).")
+    supplied = [x is not None for x in X_train_aux]
+    resample = [guide.main] + [a for a, s in zip(guide.aux, supplied) if s]
+    carry_over = [f"train_aux{i}/" for i, s in enumerate(supplied) if not s]
+    return _recondition(guide, params, samples, resample, carry_over,
+                        X_train_main = X_train_main, Y_train_main = Y_train_main,
+                        X_train_aux = X_train_aux, Y_train_aux = Y_train_aux)
