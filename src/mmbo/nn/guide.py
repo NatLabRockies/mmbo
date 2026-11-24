@@ -104,7 +104,7 @@ class _BaseBNNGuide(PyroModule):
             )
         self.last_bW = PyroSample(lambda self:
                 MatrixNormal(self._training_last_bW_mean.mT, 
-                             row_scale_tril = p2st_with_retry(self.precision), #_precision_to_scale_tril(self.precision), 
+                             row_scale_tril = p2st_with_retry(self.precision),
                              col_scale_tril = self._training_Lambda_tril)
             )
 
@@ -149,10 +149,8 @@ class _BaseBNNGuide(PyroModule):
         # Posterior parameters
         Lambda_inv = Lambda0_inv + X_obs.mT @ X_obs
         Lambda = pd_inv_with_retry(Lambda_inv)
-        #mu = torch.linalg.solve(Lambda_inv, X_obs.mT @ y_obs)
         mu = Lambda @ X_obs.mT @ y_obs
         a = a0 + n_obs / 2
-        #b = b0 + (y_obs.mT @ y_obs - mu.mT @ Lambda_inv @ mu).squeeze() / 2
         b = b0 + (y_obs.mT @ (torch.eye(n_obs, dtype=X_miss.dtype, device=X_miss.device) - X_obs @ Lambda @ X_obs.mT) @ y_obs).squeeze().clamp(min = -1.99 * b0) / 2
         # Compile into posterior predictive and return
         Sigma = (b / a) * (torch.eye(n_miss, dtype=X_miss.dtype, device=X_miss.device) + 

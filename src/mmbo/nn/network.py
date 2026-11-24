@@ -15,10 +15,10 @@ from ..util import p2st_with_retry
 
 __all__ = ["RegBNN", "LayeredRegBNN", "predictor", "predictor_batch"]
 
-"""A batched version of torch.nn.functional.linear using unsqueeze,
-matrix multiply, and squeeze. Allows for batched weights/biases, e.g.,
-for posterior samples."""
 def _batch_linear(X: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor):
+    """A batched version of torch.nn.functional.linear using unsqueeze,
+    matrix multiply, and squeeze. Allows for batched weights/biases, e.g.,
+    for posterior samples."""
     return (X.unsqueeze(-2) @ weight.mT).squeeze(-2) + bias
 
 class BNNLinearLayer(PyroModule):
@@ -124,7 +124,7 @@ class _BaseBNN(PyroModule):
         self.precision = PyroSample(dist.Wishart(self.nu0, scale_tril = self.V0_tril, validate_args = False))
         self.last_bW = PyroSample(lambda self:
                 MatrixNormal(self.last_bW_mean, 
-                             row_scale_tril = p2st_with_retry(self.precision), #_precision_to_scale_tril(self.precision), 
+                             row_scale_tril = p2st_with_retry(self.precision),
                              col_scale_tril = self.Lambda0_tril)
             )
         

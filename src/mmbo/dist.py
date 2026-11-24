@@ -143,8 +143,6 @@ class MatrixNormal(TorchDistribution):
             upper=True, left=False
         )
         trace = halftrace.pow(2).sum(dim=[-2,-1]) # tr(A^T A) = sum of squared elements of A
-        # Old calculation
-        #trace = (self.V_inv @ (value - self.loc).mT @ self.U_inv @ (value - self.loc)).diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
 
         return - trace / 2 - normconst - half_U_logdet * p - half_V_logdet * n
 

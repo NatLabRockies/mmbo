@@ -30,12 +30,9 @@ def make_positive_definite(A: torch.Tensor, correction_factor = 1e-5) -> torch.T
         A = A.unsqueeze(0)
     is_posdef = constraints.positive_definite.check(A)
     if not is_posdef.all():
-        d = A.shape[-1]
         result = A.clone()
         # Only correct matrices where is_posdef is False
         A_sym = make_symmetric(A[is_posdef.logical_not()])
-        #eps = (1e-5 * A[is_posdef.logical_not()].diagonal(dim1=-2, dim2=-1).max(dim=-1).values + 1e-8) * correction_factor
-        #ridge = eps.unsqueeze(-1).expand((*eps.shape, d)).diag_embed()
         # If there's a negative or zero diagonal, or non-finite values anywhere, raise an exception
         if not torch.isfinite(A_sym).all():
             raise Exception("Cannot correct matrix with non-finite elements.")
