@@ -6,8 +6,6 @@ import torch_pca
 
 import torch
 
-from .vae import VAE
-
 __all__ = ["autocovar", "TSPCA", "VarTSPCA"]
 
 ###############################################################################

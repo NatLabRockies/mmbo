@@ -296,7 +296,8 @@ class LayeredRegBNN(PyroModule):
             self.aux.append(
                 _BaseBNN(n_feat, out, *args,
                        feature_means = feature_means, feature_stds = feature_stds,
-                       out_means = means, out_stds = stds, **kwargs)
+                       out_means = means, out_stds = stds, 
+                       **kwargs)
             )
         
         # Assemble the full feature means and stds if provided for the main network
