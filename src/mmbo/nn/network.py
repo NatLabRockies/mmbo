@@ -1,17 +1,13 @@
 import math
-import functools
 from typing import Sequence, Optional
 
 import torch
 from torch.nn.functional import linear, tanh, relu, elu, softplus, gelu, leaky_relu
-from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
 from pyro.nn import PyroModule, PyroModuleList, PyroSample
 import pyro.distributions as dist
 import pyro
-import pyro.poutine as poutine
 from pyro.contrib.autoname import scope
-from pyro.infer import Predictive
 
 from .normalizer import PyroNormalizer, PyroUnNormalizer, mean_std
 from ..dist import MatrixNormal, ConditionalMultivariateNormal

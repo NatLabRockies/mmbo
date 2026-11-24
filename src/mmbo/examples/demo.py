@@ -1,10 +1,5 @@
-from typing import Tuple
 import itertools
 
-import scipy.interpolate as interpolate
-import importlib.resources as resources
-import pandas as pd
-import numpy as np
 import torch
 
 from .testfunc import paciorek_hf, paciorek_lf, branin_hf, branin_lf

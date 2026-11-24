@@ -1,7 +1,5 @@
 import warnings
 
-import pyro
-from pyro.infer import Predictive
 import torch
 import botorch
 from .nn import predictor, predictor_batch

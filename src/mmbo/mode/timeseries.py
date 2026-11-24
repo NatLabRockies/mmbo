@@ -1,7 +1,5 @@
 ### This file contains code for processing and extracting features from time series data
 
-import math
-
 import torch_pca
 
 import torch

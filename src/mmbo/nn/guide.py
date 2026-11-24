@@ -4,17 +4,14 @@ from typing import Optional, Sequence, Union
 from pyro.nn import PyroModule, PyroSample, PyroParam, PyroModuleList
 import pyro.distributions as dist
 import pyro.distributions.constraints as constraints
-import pyro.distributions.transforms as transforms
 import pyro
 from pyro.contrib.autoname import scope
 import torch
-from torch import nn
 from torch.nn.functional import linear, tanh, relu, elu, softplus, gelu, leaky_relu
-from torch.distributions.multivariate_normal import _precision_to_scale_tril
 from pyro.infer import Predictive
 
-from .network import RegBNN, LayeredRegBNN, _BaseBNN, _vector_pack, _batch_linear
-from ..dist import MatrixNormal, ConditionalMultivariateNormal
+from .network import RegBNN, LayeredRegBNN, _BaseBNN
+from ..dist import MatrixNormal
 from ..util import pd_inv_with_retry, p2st_with_retry, cholesky_with_retry
 
 __all__ = ["RegBNNGuide", "LayeredRegBNNGuide", "posterior_samples"]

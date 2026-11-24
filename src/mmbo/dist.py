@@ -4,9 +4,6 @@ from torch.distributions.utils import _standard_normal
 from pyro.distributions import TorchDistribution
 import pyro.distributions as dist
 from pyro.distributions import constraints
-from pyro.distributions import transforms
-from pyro.distributions.score_parts import ScoreParts
-import functools
 
 from .transforms import softplus_positive_ordered_vector, real_matrix, nanmaskedreal_vector
 from .util import make_positive_definite

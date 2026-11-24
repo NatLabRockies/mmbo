@@ -1,7 +1,6 @@
 import torch
 from pyro.distributions import constraints
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
-import logging
 
 def make_symmetric(A: torch.Tensor) -> torch.Tensor:
     """Make a matrix symmetric by averaging it with its transpose."""
