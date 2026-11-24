@@ -281,7 +281,11 @@ class RegBNNGuide(PyroModule):
     
     def forward(self, *, 
                 X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
-                X_pred: torch.Tensor = None):
+                X_pred: torch.Tensor = None, sample_missing: bool = True):
+        # sample_missing is accepted so the guide's signature matches
+        # RegBNN.forward (SVI and Predictive pass the same keyword
+        # arguments to both). The guide always imputes missing Y values,
+        # because its last-layer posterior needs a complete Y.
         # Feed the training data through first (if present)
         if X_train is not None:
             mu = self.net(X_train, Y_train, label="train")

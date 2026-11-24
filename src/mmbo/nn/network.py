@@ -241,11 +241,11 @@ class RegBNN(PyroModule):
 
     def forward(self, *, 
                 X_train: torch.Tensor = None, Y_train: torch.Tensor = None, 
-                X_pred: torch.Tensor = None):
-        
+                X_pred: torch.Tensor = None, sample_missing: bool = True):
+
         # Feed the training data through first (if present)
         if X_train is not None:
-            mu = self.net(X_train, Y_train, label="train")
+            mu = self.net(X_train, Y_train, label="train", sample_missing=sample_missing)
         else:
             mu = None
         # Feed the prediction data through second (if present)
@@ -346,7 +346,7 @@ class LayeredRegBNN(PyroModule):
         if X_train_main is not None:
             # Training data through aux networks
             for i in range(len(self.aux)):
-                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}")
+                self.aux[i](X_train_aux[i], Y_train_aux[i], label=f"train_aux{i}", sample_missing=sample_missing)
             
             # Pass main training X through aux networks
             aux_out_train = [self.aux[i](X_train_main, label=f"maintrain_aux{i}") for i in range(len(self.aux))]
@@ -357,7 +357,7 @@ class LayeredRegBNN(PyroModule):
             if X_train_main.shape[:-1] != aux_out_train_cat.shape[:-1]:
                 X_train_main = X_train_main.unsqueeze(0).expand(*aux_out_train_cat.shape[:-1], -1)
             X_train_main_full = torch.cat([X_train_main, aux_out_train_cat], dim = -1)
-            mu = self.main(X_train_main_full, Y_train_main, label="train_main")
+            mu = self.main(X_train_main_full, Y_train_main, label="train_main", sample_missing=sample_missing)
         else:
             mu = None
 
