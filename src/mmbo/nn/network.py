@@ -19,24 +19,6 @@ from ..util import p2st_with_retry
 
 __all__ = ["RegBNN", "LayeredRegBNN", "predictor", "predictor_batch"]
 
-def _gen_Lambda0_tril(width, prior_variance):
-        mat = torch.eye(width+1) / math.sqrt(width)
-        mat[1,1] = 1
-        mat /= math.sqrt(prior_variance)
-        return mat
-    
-def _gen_Lambda0(width, prior_variance):
-    mat = torch.eye(width + 1) / width
-    mat[1,1] = 1
-    mat /= prior_variance
-    return mat
-
-def _gen_Lambda0_inv(width, prior_variance):
-    mat = torch.eye(width + 1) * width
-    mat[1,1] = 1
-    mat *= prior_variance
-    return mat
-
 """A batched version of torch.nn.functional.linear using unsqueeze,
 matrix multiply, and squeeze. Allows for batched weights/biases, e.g.,
 for posterior samples."""
@@ -262,15 +244,6 @@ def _vector_pack(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
     equal dimension, into one 2d tensor with the same length last dimension."""
     assert all(t.ndim >= 2 for t in tensors)
     return torch.cat(tensors, dim=-2)
-
-def _vector_unpack(tensor: torch.Tensor, batch_shapes: Sequence[int]) -> Sequence[torch.Tensor]:
-    """Undoes the operation of _vector_pack, by unpacking the first dimension
-    of the 2d input tensor into one tensor per element in the iterable
-    batch_shapes. Each resulting tensor will have leading dimensions according
-    to the values in batch_shapes, and final dimension equal to the last dimension
-    of the input tensor."""
-    assert tensor.ndim >= 2, f"Shape is {tensor.shape}"
-    return torch.split(tensor, batch_shapes, dim=-2)
 
 
 class LayeredRegBNN(PyroModule):

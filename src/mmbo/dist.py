@@ -94,14 +94,6 @@ class OrderedHalfNormal(TorchDistribution):
         return self.basenorm.log_prob(value) + self.lognfact
 
 
-def _matrixkron(A: torch.Tensor, B: torch.Tensor):
-    """Performs the Kronecker product between two tensors only in their last
-    two dimensions, rather than doing the product in all dimensions like
-    torch.kron(). I.e., this treats the tensors like batches of matrices."""
-    batch_shape = torch.broadcast_shapes(A.shape[:-2], B.shape[:-2])
-    result_shape = (A.shape[-2] * B.shape[-2], A.shape[-1] * B.shape[-1])
-    return (A.unsqueeze(-1).unsqueeze(-3) * B.unsqueeze(-2).unsqueeze(-4)).reshape(*batch_shape, *result_shape)
-
 class MatrixNormal(TorchDistribution):
 
     has_rsample = True

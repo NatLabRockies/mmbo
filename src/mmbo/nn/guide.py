@@ -13,7 +13,7 @@ from torch.nn.functional import linear, tanh, relu, elu, softplus, gelu, leaky_r
 from torch.distributions.multivariate_normal import _precision_to_scale_tril
 from pyro.infer import Predictive
 
-from .network import RegBNN, LayeredRegBNN, _BaseBNN, _vector_pack, _vector_unpack, _batch_linear
+from .network import RegBNN, LayeredRegBNN, _BaseBNN, _vector_pack, _batch_linear
 from ..dist import MatrixNormal, ConditionalMultivariateNormal
 from ..util import pd_inv_with_retry, p2st_with_retry, cholesky_with_retry
 

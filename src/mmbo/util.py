@@ -122,6 +122,6 @@ def woodbury_inv(A_inv_diag: torch.Tensor, X: torch.Tensor, C_inv: torch.Tensor 
         device = A_inv_diag.device
         dtype = A_inv_diag.dtype
         C_inv = torch.eye(n, device = device, dtype = dtype)
-    X_scaled = X * A_inv_diag.unsqueze(-2) # Column-scaled X, as if post-multiplied by A^(-1) 
+    X_scaled = X * A_inv_diag.unsqueeze(-2) # Column-scaled X, as if post-multiplied by A^(-1) 
     B = C_inv + X_scaled @ X.mT
     return A_inv_diag.diag_embed() - X_scaled.mT @ torch.linalg.solve(B, X_scaled)
