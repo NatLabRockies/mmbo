@@ -1,3 +1,5 @@
+import warnings
+
 import pyro
 from pyro.infer import Predictive
 import torch
@@ -48,7 +50,7 @@ def select_next_point(objective, num_candidates, low_lim, high_lim, num_raw_samp
     if num_raw_samples is None and initial_samples is None:
         raise ValueError("Must supply either num_raw_samples or initial_samples")
     if num_raw_samples is not None and initial_samples is not None:
-        raise Warning("num_raw_samples is ignored if initial_samples is given")
+        warnings.warn("num_raw_samples is ignored if initial_samples is given")
     if initial_samples is None:
         initial_samples = rect_sample(num_raw_samples, low_lim, high_lim)
     # Select the top 'num_candidates' of the initial samples to use as starting points

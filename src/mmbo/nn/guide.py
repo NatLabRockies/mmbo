@@ -269,7 +269,7 @@ class RegBNNGuide(PyroModule):
     """A custom guide for RegBNN models that captures the kind of posterior dependence
     that matters for the model's predictive abilities."""
 
-    def __init__(self, model: RegBNN, sub_ll_train: bool = False):
+    def __init__(self, model: RegBNN):
         super().__init__()
 
         self.net = _BaseBNNGuide(model.net)
@@ -313,7 +313,11 @@ class LayeredRegBNNGuide(PyroModule):
     def forward(self, *, 
                 X_train_main: Optional[torch.Tensor] = None, Y_train_main: Optional[torch.Tensor] = None,
                 X_train_aux: Optional[Sequence[torch.Tensor]] = None, Y_train_aux: Optional[Sequence[torch.Tensor]] = None, 
-                X_pred: Optional[torch.Tensor] = None):
+                X_pred: Optional[torch.Tensor] = None, sample_missing: bool = True):
+        # sample_missing is accepted so the guide's signature matches
+        # LayeredRegBNN.forward (SVI and Predictive pass the same keyword
+        # arguments to both). The guide always imputes missing Y values,
+        # because its last-layer posterior needs a complete Y.
         # Training
         if X_train_main is not None:
             # Training data through aux networks

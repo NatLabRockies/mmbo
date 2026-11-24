@@ -194,7 +194,7 @@ class ConditionalMultivariateNormal(TorchDistribution):
         
         # Make sure any batch dimensions of condition get incorporated into the underlying distribution
         if loc.shape[-1] != condition.shape[-1]:
-            raise ValueError(f"Last dimension of condition ({condition.shape[-1:]}) must match last dimension of loc ({event_shape})")
+            raise ValueError(f"Last dimension of condition ({condition.shape[-1:]}) must match last dimension of loc ({loc.shape[-1:]})")
 
         self.unconditioned = dist.NanMaskedMultivariateNormal(
             loc.expand(torch.broadcast_shapes(loc.shape, condition.shape)), 
