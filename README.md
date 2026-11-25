@@ -190,7 +190,7 @@ model_layered.train()  # switch back before training the model further
 
 Outputs may contain `nan` values, which are treated as missing observations. This is what makes the joint model possible, but missing values are allowed in the outputs of any model and any modality. Inputs may not contain missing values.
 
-During training, the guide imputes the missing outputs from the last-layer posterior predictive distribution. The models' `sample_missing` keyword argument (default `True`) controls whether the model also includes a sample site for the imputed outputs. It is passed like the training data, e.g. `do_svi(svi, X_train = X, Y_train = Y, sample_missing = False)`. With `sample_missing = False`, Pyro warns that the guide has a sample site that the model does not; this is expected.
+During training, the guide imputes the missing outputs from the last-layer posterior predictive distribution. The models' `sample_missing` keyword argument (default `True`) controls whether the model also includes a sample site for the imputed outputs. Imputing missing data incurs some computational cost, so avoiding this step can be beneficial if it's not needed. It is passed like the training data, e.g. `do_svi(svi, X_train = X, Y_train = Y, sample_missing = False)`. With `sample_missing = False`, Pyro warns that the guide has a sample site that the model does not; this is expected.
 
 ## References
 
